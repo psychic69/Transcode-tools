@@ -314,3 +314,15 @@ for SOURCE_FILE in "$TV_INPUT_DIR"/*
 
  done
 
+# All transcoding complete - update Plex library
+write_log "INFO" "=========================================="
+write_log "INFO" "All transcoding complete. Updating Plex library..."
+write_log "INFO" "=========================================="
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -x "$SCRIPT_DIR/Plex-update" ]]; then
+    "$SCRIPT_DIR/Plex-update"
+else
+    write_log "WARN" "Plex-update script not found or not executable at $SCRIPT_DIR/Plex-update"
+fi
+

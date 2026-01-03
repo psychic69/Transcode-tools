@@ -17,6 +17,7 @@ fi
 
 # --- YOUR EXISTING TRANSCODE LOGIC HERE ---
 # (Your ffmpeg or Handbrake commands)
+sleep 120
 
 # --- PLEX UPDATE TRIGGER ---
 echo "Transcode finished. Triggering Plex scan via HTTPS..."
