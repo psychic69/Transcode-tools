@@ -165,7 +165,7 @@ if [[ "$A_CODEC" == "aac" ]]; then
 else
     case $A_CHANNELS in
         2)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
-        6)  AUDIO_OPTS="-c:a libopus -b:a 262144 -mapping_family 1" ;;
+        6)  AUDIO_OPTS="-c:a libopus -b:a 256000 -mapping_family 1" ;;
         8)  AUDIO_OPTS="-c:a libopus -b:a 320000 -mapping_family 1" ;;
         *)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
     esac
@@ -204,7 +204,7 @@ if [[ -f "$OUTPUT" ]]; then
         write_log "INFO" "Safety checks passed. Savings: $(printf '%.2f' $SAVINGS)%. Replacing original."
         FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
         mv "$OUTPUT" "$FINAL_OUTPUT"
-        [[ "$INPUT" != *.mkv ]] && rm "$INPUT"
+        rm "$INPUT"
     else
         [ "$IS_DURATION_VALID" -eq 0 ] && write_log "WARN" "Duration mismatch: Orig $ORIG_DURATION vs New $NEW_DURATION"
         [ "$IS_SIZE_VALID" -eq 0 ] && write_log "INFO" "Target 30% savings not met. Keeping original."
