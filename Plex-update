@@ -27,6 +27,8 @@ done
 if [[ $MISSING_VAR -eq 1 ]]; then
     exit 1
 fi
+# Cooling off period (2 min)
+sleep 120 
 
 echo "Configuration verified. Proceeding with Plex update..."
 
