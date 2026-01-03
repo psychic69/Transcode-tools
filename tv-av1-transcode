@@ -11,10 +11,55 @@ ALLOWED_EXT="mp4,mkv"
 # Data to inject into the script
 #  $1 - The {base_dir}
 #  $2 - only using this if using middleman between sonarr input and output dir
+#  Optional: -debug flag to keep FFmpeg output visible for troubleshooting
 
+# Check if no arguments provided
+if [[ $# -eq 0 ]]; then
+    echo "Usage: $0 [-debug] <input_dir> [output_dir]"
+    echo ""
+    echo "Arguments:"
+    echo "  -debug       Enable debug mode to log FFmpeg output (optional, recommend first position)"
+    echo "  input_dir    Directory containing media files to transcode"
+    echo "  output_dir   Output directory for transcoded files (defaults to input_dir if not specified)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 /media/tv"
+    echo "  $0 /media/tv /media/tv-transcoded"
+    echo "  $0 -debug /media/tv"
+    echo "  $0 -debug /media/tv /media/tv-transcoded"
+    exit 1
+fi
 
-TV_INPUT_DIR=$1
-TV_OUTPUT_DIR=${2:-$1}
+# Parse command line arguments
+DEBUG=0
+for arg in "$@"; do
+    if [[ "$arg" == "-debug" ]]; then
+        DEBUG=1
+    fi
+done
+
+# Set directory parameters (skip -debug flag)
+TV_INPUT_DIR=""
+TV_OUTPUT_DIR=""
+arg_count=0
+for arg in "$@"; do
+    if [[ "$arg" != "-debug" ]]; then
+        ((arg_count++))
+        if [[ $arg_count -eq 1 ]]; then
+            TV_INPUT_DIR="$arg"
+        elif [[ $arg_count -eq 2 ]]; then
+            TV_OUTPUT_DIR="$arg"
+        fi
+    fi
+done
+TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
+
+# Set FFmpeg output redirection based on DEBUG flag
+if [[ $DEBUG -eq 0 ]]; then
+    FFMPEG_OUTPUT="> /dev/null 2>&1"
+else
+    FFMPEG_OUTPUT=">> \"$LOG_DIR/logfile-$(date \"+%m-%d-%y\")\" 2>&1"
+fi
 
 # ************************************************
 function write_log {
@@ -175,10 +220,10 @@ fi
 # --- 6. Execution ---
 write_log "INFO" "Executing FFmpeg command..."
 if [[ "$V_CODEC" == "av1" ]]; then
-    $FFMPEG -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart "$OUTPUT" >> "$LOG_DIR/logfile-$(date "+%m-%d-%y")" 2>&1
+    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart \"$OUTPUT\" $FFMPEG_OUTPUT"
 else
-    $FFMPEG -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
-      -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart "$OUTPUT" >> "$LOG_DIR/logfile-$(date "+%m-%d-%y")" 2>&1
+    eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv \
+      -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart \"$OUTPUT\" $FFMPEG_OUTPUT"
 fi
 
 if [ $? -ne 0 ]; then
