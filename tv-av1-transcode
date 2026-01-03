@@ -56,9 +56,9 @@ TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
 
 # Set FFmpeg output redirection based on DEBUG flag
 if [[ $DEBUG -eq 0 ]]; then
-    FFMPEG_OUTPUT="> /dev/null 2>&1"
+    FFMPEG_REDIRECT="> /dev/null 2>&1"
 else
-    FFMPEG_OUTPUT=">> \"$LOG_DIR/logfile-$(date \"+%m-%d-%y\")\" 2>&1"
+    FFMPEG_REDIRECT=">> $LOG_DIR/logfile-$(date +%m-%d-%y) 2>&1"
 fi
 
 # ************************************************
@@ -225,10 +225,10 @@ fi
 # --- 6. Execution ---
 write_log "INFO" "Executing FFmpeg command..."
 if [[ "$V_CODEC" == "av1" ]]; then
-    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart \"$OUTPUT\" $FFMPEG_OUTPUT"
+    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT"
 else
     eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv \
-      -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s ssa -movflags +faststart \"$OUTPUT\" $FFMPEG_OUTPUT"
+      -i \"$INPUT\" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT"
 fi
 
 if [ $? -ne 0 ]; then
