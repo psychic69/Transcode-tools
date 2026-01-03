@@ -161,9 +161,9 @@ if [[ "$A_CODEC" == "aac" ]]; then
     AUDIO_OPTS="-c:a copy"
 else
     case $A_CHANNELS in
-        2)  AUDIO_OPTS="-c:a libopus -b:a 128k -ac 2" ;;
-        6)  AUDIO_OPTS="-c:a libopus -b:a 256k -af channelmap=channel_layout=5.1 -ac 6" ;;
-        8)  AUDIO_OPTS="-c:a libopus -b:a 320k -af channelmap=channel_layout=7.1 -ac 8" ;;
+        2)  AUDIO_OPTS="-c:a libopus -ac 2 -b:a 128k" ;;
+        6)  AUDIO_OPTS="-c:a libopus -ac 6 -b:a 192k -filter:a \"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR\"" ;;
+        8)  AUDIO_OPTS="-c:a libopus -ac 8 -b:a 256k -filter:a \"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR|BL-SL|BR-SR\"" ;;
         *)  AUDIO_OPTS="-c:a libopus -b:a 128k" ;; 
     esac
     write_log "INFO" "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus with Channel Mapping fix."
@@ -172,10 +172,10 @@ fi
 # --- 6. Execution ---
 write_log "INFO" "Executing FFmpeg command..."
 if [[ "$V_CODEC" == "av1" ]]; then
-    $FFMPEG -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart "$OUTPUT" 2>>/dev/null
+    $FFMPEG -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart "$OUTPUT" >> "$LOG_DIR/logfile-$(date "+%m-%d-%y")" 2>&1
 else
     $FFMPEG -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
-      -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart "$OUTPUT" 2>>/dev/null
+      -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -c:s copy -movflags +faststart "$OUTPUT" >> "$LOG_DIR/logfile-$(date "+%m-%d-%y")" 2>&1
 fi
 
 if [ $? -ne 0 ]; then
