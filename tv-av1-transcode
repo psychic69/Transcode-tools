@@ -171,6 +171,11 @@ INPUT="$1"
 BASENAME=$(basename "$INPUT")
 EXT="${BASENAME##*.}"
 
+# Log filename at the start of processing
+write_log INFO "=========================================="
+write_log INFO "Processing: $BASENAME"
+write_log INFO "=========================================="
+
 ##Will write the temporary file to the TV_OUTPUT_DIR
 OUTPUT="$2/${BASENAME%.*}.av1.tmp.mkv"
 
@@ -271,6 +276,7 @@ fi
 
 check_helper_bin
 write_log INFO "Beginning of Script Execution, loading modules"
+write_log INFO "=========================================="
 
 #Incoming encode files to pass to transcode block
 
