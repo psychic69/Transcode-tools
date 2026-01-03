@@ -151,7 +151,7 @@ else
     PIX_FMT=$($FFPROBE -v error -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     [[ "$PIX_FMT" == *"10le"* ]] && VF_CHAIN="format=qsv" || VF_CHAIN="format=qsv,scale_qsv=format=p010"
     
-    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality $gq -look_ahead 1 -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0"
+    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0"
     write_log "INFO" "Video is $V_CODEC ($PIX_FMT). Initializing Intel QSV AV1 10-bit Encode."
 fi
 
@@ -161,10 +161,10 @@ if [[ "$A_CODEC" == "aac" ]]; then
     AUDIO_OPTS="-c:a copy"
 else
     case $A_CHANNELS in
-        2)  AUDIO_OPTS="-c:a libopus -ac 2 -b:a 128k" ;;
-        6)  AUDIO_OPTS="-c:a libopus -ac 6 -b:a 192k -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR" ;;
-        8)  AUDIO_OPTS="-c:a libopus -ac 8 -b:a 256k -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR|BL-SL|BR-SR" ;;
-        *)  AUDIO_OPTS="-c:a libopus -b:a 128k" ;; 
+        2)  AUDIO_OPTS="-c:a libopus -ac 2 -b:a 128k -vbr on" ;;
+        6)  AUDIO_OPTS="-c:a libopus -ac 6 -b:a 192k -vbr on -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR" ;;
+        8)  AUDIO_OPTS="-c:a libopus -ac 8 -b:a 256k -vbr on -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR|BL-SL|BR-SR" ;;
+        *)  AUDIO_OPTS="-c:a libopus -b:a 128k -vbr on" ;; 
     esac
     write_log "INFO" "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus with Channel Mapping fix."
 fi
