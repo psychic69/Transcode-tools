@@ -165,7 +165,7 @@ if [[ "$A_CODEC" == "aac" ]]; then
 else
     case $A_CHANNELS in
         2)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
-        6)  AUDIO_OPTS="-c:a libopus -b:a 256000 -mapping_family 1" ;;
+        6)  AUDIO_OPTS="-c:a libopus -b:a 256k" ;;
         8)  AUDIO_OPTS="-c:a libopus -b:a 320000 -mapping_family 1" ;;
         *)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
     esac
