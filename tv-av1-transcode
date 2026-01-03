@@ -162,8 +162,8 @@ if [[ "$A_CODEC" == "aac" ]]; then
 else
     case $A_CHANNELS in
         2)  AUDIO_OPTS="-c:a libopus -ac 2 -b:a 128k" ;;
-        6)  AUDIO_OPTS="-c:a libopus -ac 6 -b:a 192k -filter:a \"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR\"" ;;
-        8)  AUDIO_OPTS="-c:a libopus -ac 8 -b:a 256k -filter:a \"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR|BL-SL|BR-SR\"" ;;
+        6)  AUDIO_OPTS="-c:a libopus -ac 6 -b:a 192k -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR" ;;
+        8)  AUDIO_OPTS="-c:a libopus -ac 8 -b:a 256k -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR|BL-SL|BR-SR" ;;
         *)  AUDIO_OPTS="-c:a libopus -b:a 128k" ;; 
     esac
     write_log "INFO" "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus with Channel Mapping fix."
