@@ -1,33 +1,42 @@
 #!/bin/bash
 
-# --- CONFIGURATION LOADING ---
-# Get the directory where the script is located
+# --- 1. FIND CONFIG FILE ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/parameter.ini"
 
-if [ -f "$CONFIG_FILE" ]; then
-    # Load variables from the .ini file
-    # We use 'sed' to strip potential carriage returns if edited in Windows
-    export $(grep -v '^#' "$CONFIG_FILE" | xargs -d '\n')
-    echo "Configuration loaded from parameter.ini."
-else
-    echo "ERROR: parameter.ini not found in $SCRIPT_DIR"
+# --- 2. CHECK IF FILE EXISTS ---
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "ERROR: Configuration file '$CONFIG_FILE' is missing."
+    echo "Please create it on the server (it is gitignored)."
     exit 1
 fi
 
-# --- YOUR EXISTING TRANSCODE LOGIC HERE ---
-# (Your ffmpeg or Handbrake commands)
-sleep 120
+# --- 3. LOAD VARIABLES ---
+# This exports variables while ignoring comments and empty lines
+export $(grep -v '^#' "$CONFIG_FILE" | xargs -d '\n')
 
-# --- PLEX UPDATE TRIGGER ---
-echo "Transcode finished. Triggering Plex scan via HTTPS..."
+# --- 4. VALIDATE PARAMETERS ---
+MISSING_VAR=0
+for VAR in PLEX_IP PLEX_TOKEN LIBRARY_ID; do
+    if [[ -z "${!VAR}" ]]; then
+        echo "ERROR: Variable '$VAR' is missing in parameter.ini"
+        MISSING_VAR=1
+    fi
+done
 
-# The variables below are now filled from your parameter.ini
+if [[ $MISSING_VAR -eq 1 ]]; then
+    exit 1
+fi
+
+echo "Configuration verified. Proceeding with Plex update..."
+
+# --- 5. EXECUTE PLEX REFRESH ---
+# Using the verified variables from parameter.ini
 curl -s -k -G "https://${PLEX_IP}:32400/library/sections/${LIBRARY_ID}/refresh" \
      -d "X-Plex-Token=${PLEX_TOKEN}" > /dev/null
 
-if [ $? -eq 0 ]; then
-    echo "Scan command successfully sent to Plex for Library #${LIBRARY_ID}."
+if [[ $? -eq 0 ]]; then
+    echo "Successfully signaled Plex Library #${LIBRARY_ID} to scan."
 else
-    echo "Failed to contact Plex. Check network/HTTPS settings."
+    echo "ERROR: Failed to connect to Plex at https://${PLEX_IP}:32400"
 fi
