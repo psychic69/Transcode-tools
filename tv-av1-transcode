@@ -154,7 +154,7 @@ else
     PIX_FMT=$($FFPROBE -v error -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     [[ "$PIX_FMT" == *"10le"* ]] && VF_CHAIN="format=qsv" || VF_CHAIN="format=qsv,scale_qsv=format=p010"
     
-    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0"
+    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0"
     write_log "INFO" "Video is $V_CODEC ($PIX_FMT). Initializing Intel QSV AV1 10-bit Encode."
 fi
 
@@ -165,7 +165,7 @@ if [[ "$A_CODEC" == "aac" ]]; then
 else
     case $A_CHANNELS in
         2)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
-        6)  AUDIO_OPTS="-c:a libopus -b:a 256k" ;;
+        6)  AUDIO_OPTS="-c:a libopus -b:a 262144 -mapping_family 1" ;;
         8)  AUDIO_OPTS="-c:a libopus -b:a 320000 -mapping_family 1" ;;
         *)  AUDIO_OPTS="-c:a libopus -b:a 128000" ;;
     esac
