@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# --- CONFIGURATION LOADING ---
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/parameter.ini"
+
+if [ -f "$CONFIG_FILE" ]; then
+    # Load variables from the .ini file
+    # We use 'sed' to strip potential carriage returns if edited in Windows
+    export $(grep -v '^#' "$CONFIG_FILE" | xargs -d '\n')
+    echo "Configuration loaded from parameter.ini."
+else
+    echo "ERROR: parameter.ini not found in $SCRIPT_DIR"
+    exit 1
+fi
+
+# --- YOUR EXISTING TRANSCODE LOGIC HERE ---
+# (Your ffmpeg or Handbrake commands)
+
+# --- PLEX UPDATE TRIGGER ---
+echo "Transcode finished. Triggering Plex scan via HTTPS..."
+
+# The variables below are now filled from your parameter.ini
+curl -s -k -G "https://${PLEX_IP}:32400/library/sections/${LIBRARY_ID}/refresh" \
+     -d "X-Plex-Token=${PLEX_TOKEN}" > /dev/null
+
+if [ $? -eq 0 ]; then
+    echo "Scan command successfully sent to Plex for Library #${LIBRARY_ID}."
+else
+    echo "Failed to contact Plex. Check network/HTTPS settings."
+fi
