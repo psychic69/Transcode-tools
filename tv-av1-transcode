@@ -1,8 +1,8 @@
 #!/bin/bash
 
 JQ=/usr/bin/jq
-FFMPEG="usr/lib/jellyfin-ffmpeg/ffmpeg" 
-FFPROBE="usr/lib/jellyfin-ffmpeg/ffprobe"
+FFMPEG="/usr/lib/jellyfin-ffmpeg/ffmpeg" 
+FFPROBE="/usr/lib/jellyfin-ffmpeg/ffprobe"
 MEDIAINFO=/usr/bin/mediainfo
 DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
