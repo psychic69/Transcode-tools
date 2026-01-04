@@ -234,6 +234,10 @@ else
     write_log "INFO" "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus with Channel Mapping fix."
 fi
 
+# Log the encoding options being used
+write_log "INFO" "VIDEO_OPTS: $VIDEO_OPTS"
+write_log "INFO" "AUDIO_OPTS: $AUDIO_OPTS"
+
 # --- 6. Execution ---
 write_log "INFO" "Executing FFmpeg command..."
 if [[ "$V_CODEC" == "av1" ]]; then
