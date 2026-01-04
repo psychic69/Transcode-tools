@@ -203,7 +203,7 @@ if [[ "$V_CODEC" == "av1" && ("$A_CODEC" == "aac" || "$A_CODEC" == "opus") ]]; t
     FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.${EXT}"
     if [[ "$INPUT" != "$FINAL_OUTPUT" ]]; then
         mv "$INPUT" "$FINAL_OUTPUT"
-        write_log "INFO" "Renamed $BASENAME to $(basename $FINAL_OUTPUT)"
+        write_log "INFO" "Renamed $BASENAME to $(basename "$FINAL_OUTPUT")"
     fi
     return
 fi
