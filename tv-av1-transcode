@@ -186,8 +186,9 @@ write_log INFO "=========================================="
 ##Will write the temporary file to the TV_OUTPUT_DIR
 OUTPUT="$2/${BASENAME%.*}.av1.tmp.mkv"
 
-# Clean up any stale temporary file from a previous failed attempt
+# Clean up any stale temporary files from previous failed attempts
 rm -f "$OUTPUT"
+rm -f "$2/${BASENAME%.*}.av1.tmp-OPT.mkv"
 
 ####Beginning of deep dive
 
