@@ -12,13 +12,15 @@ ALLOWED_EXT="mp4,mkv"
 #  $1 - The {base_dir}
 #  $2 - only using this if using middleman between sonarr input and output dir
 #  Optional: -debug flag to keep FFmpeg output visible for troubleshooting
+#  Optional: -noplex flag to skip Plex library update
 
 # Check if no arguments provided
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [-debug] <input_dir> [output_dir]"
+    echo "Usage: $0 [-debug] [-noplex] <input_dir> [output_dir]"
     echo ""
     echo "Arguments:"
-    echo "  -debug       Enable debug mode to log FFmpeg output (optional, recommend first position)"
+    echo "  -debug       Enable debug mode to log FFmpeg output (optional)"
+    echo "  -noplex      Skip Plex library update (optional)"
     echo "  input_dir    Directory containing media files to transcode"
     echo "  output_dir   Output directory for transcoded files (defaults to input_dir if not specified)"
     echo ""
@@ -27,23 +29,28 @@ if [[ $# -eq 0 ]]; then
     echo "  $0 /media/tv /media/tv-transcoded"
     echo "  $0 -debug /media/tv"
     echo "  $0 -debug /media/tv /media/tv-transcoded"
+    echo "  $0 -noplex /media/tv"
+    echo "  $0 -debug -noplex /media/tv /media/tv-transcoded"
     exit 1
 fi
 
 # Parse command line arguments
 DEBUG=0
+NOPLEX=0
 for arg in "$@"; do
     if [[ "$arg" == "-debug" ]]; then
         DEBUG=1
+    elif [[ "$arg" == "-noplex" ]]; then
+        NOPLEX=1
     fi
 done
 
-# Set directory parameters (skip -debug flag)
+# Set directory parameters (skip flag arguments)
 TV_INPUT_DIR=""
 TV_OUTPUT_DIR=""
 arg_count=0
 for arg in "$@"; do
-    if [[ "$arg" != "-debug" ]]; then
+    if [[ "$arg" != "-debug" && "$arg" != "-noplex" ]]; then
         ((arg_count++))
         if [[ $arg_count -eq 1 ]]; then
             TV_INPUT_DIR="$arg"
@@ -288,41 +295,67 @@ if [ ! -w "$TV_OUTPUT_DIR" ]; then
   fi
 fi
 
-# Loop through the media files in the directory sent into the script 
+# Recursive function to traverse directory structure and transcode files
+process_directory() {
+    local input_path="$1"
+    local output_path="$2"
 
-for SOURCE_FILE in "$TV_INPUT_DIR"/*
- do
-   # Skip directories and non-matching extensions
-   if [ ! -f "$SOURCE_FILE" ]; then
-     continue
-   fi
+    # Create output directory if it doesn't exist
+    if [ ! -d "$output_path" ]; then
+        mkdir -p "$output_path"
+    fi
 
-   # Check if file extension matches ALLOWED_EXT
-   filename=$(basename "$SOURCE_FILE")
-   ext="${filename##*.}"
+    # Loop through files and directories in the current level
+    for item in "$input_path"/*; do
+        if [ ! -e "$item" ]; then
+            continue
+        fi
 
-   if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then
-     continue
-   fi
+        # If it's a directory, recurse into it
+        if [ -d "$item" ]; then
+            local dir_name=$(basename "$item")
+            local new_output_path="$output_path/$dir_name"
+            process_directory "$item" "$new_output_path"
 
-   # Skip files that have already been optimized
-   if [[ "$filename" == *"-OPT"* ]]; then
-     continue
-   fi
+        # If it's a file, process it if it matches criteria
+        elif [ -f "$item" ]; then
+            local filename=$(basename "$item")
+            local ext="${filename##*.}"
 
-   transcode "$SOURCE_FILE" "$TV_OUTPUT_DIR"
+            # Check if file extension matches ALLOWED_EXT
+            if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then
+                continue
+            fi
 
- done
+            # Skip files that have already been optimized
+            if [[ "$filename" == *"-OPT"* ]]; then
+                continue
+            fi
 
-# All transcoding complete - update Plex library
-write_log "INFO" "=========================================="
-write_log "INFO" "All transcoding complete. Updating Plex library..."
-write_log "INFO" "=========================================="
+            # Transcode the file to the corresponding output directory
+            transcode "$item" "$output_path"
+        fi
+    done
+}
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -x "$SCRIPT_DIR/Plex-update" ]]; then
-    "$SCRIPT_DIR/Plex-update"
+# Process the input directory recursively
+process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+
+# All transcoding complete - update Plex library (unless -noplex flag is set)
+if [[ $NOPLEX -eq 0 ]]; then
+    write_log "INFO" "=========================================="
+    write_log "INFO" "All transcoding complete. Updating Plex library..."
+    write_log "INFO" "=========================================="
+
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -x "$SCRIPT_DIR/Plex-update" ]]; then
+        "$SCRIPT_DIR/Plex-update"
+    else
+        write_log "WARN" "Plex-update script not found or not executable at $SCRIPT_DIR/Plex-update"
+    fi
 else
-    write_log "WARN" "Plex-update script not found or not executable at $SCRIPT_DIR/Plex-update"
+    write_log "INFO" "=========================================="
+    write_log "INFO" "All transcoding complete. Skipping Plex library update (-noplex flag set)."
+    write_log "INFO" "=========================================="
 fi
 
