@@ -187,8 +187,8 @@ write_log INFO "=========================================="
 OUTPUT="$2/${BASENAME%.*}.av1.tmp.mkv"
 
 # Clean up any stale temporary files from previous failed attempts
-rm -f "$OUTPUT"
-rm -f "$2/${BASENAME%.*}.av1.tmp-OPT.mkv"
+# This handles both the .av1.tmp.mkv and .av1.tmp-OPT.mkv files
+rm -f "$2/${BASENAME%.*}.av1.tmp"*
 
 ####Beginning of deep dive
 
