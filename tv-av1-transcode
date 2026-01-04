@@ -197,9 +197,14 @@ A_CODEC=$($FFPROBE -v error -select_streams a:0 -show_entries stream=codec_name 
 A_CHANNELS=$($FFPROBE -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
 ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
 
-# --- 3. Skip Logic (AV1 + AAC) ---
-if [[ "$V_CODEC" == "av1" && "$A_CODEC" == "aac" ]]; then
-    write_log "INFO" "Skipping $BASENAME: Already AV1 and AAC."
+# --- 3. Skip Logic (AV1 + AAC or AV1 + Opus) ---
+if [[ "$V_CODEC" == "av1" && ("$A_CODEC" == "aac" || "$A_CODEC" == "opus") ]]; then
+    write_log "INFO" "File is already AV1 and $A_CODEC. Marking as -OPT."
+    FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.${EXT}"
+    if [[ "$INPUT" != "$FINAL_OUTPUT" ]]; then
+        mv "$INPUT" "$FINAL_OUTPUT"
+        write_log "INFO" "Renamed $BASENAME to $(basename $FINAL_OUTPUT)"
+    fi
     return
 fi
 
