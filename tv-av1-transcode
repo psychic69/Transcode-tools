@@ -261,11 +261,13 @@ if [[ -f "$OUTPUT" ]]; then
     IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
     HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$OUTPUT")
 
-    # Calculate savings percentage
+    # Calculate savings percentage and file sizes in MB
     SAVINGS=$(echo "100 - ($NEW_SIZE / $OLD_SIZE * 100)" | bc -l)
+    OLD_SIZE_MB=$(echo "scale=0; $OLD_SIZE / 1048576" | bc)
+    NEW_SIZE_MB=$(echo "scale=0; $NEW_SIZE / 1048576" | bc)
 
     if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
-        write_log "INFO" "Safety checks passed. Savings: $(printf '%.2f' $SAVINGS)%. Replacing original."
+        write_log "INFO" "Safety checks passed. Savings: $(printf '%.2f' $SAVINGS)% (${OLD_SIZE_MB} -> ${NEW_SIZE_MB} MB). Replacing original."
         FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
         mv "$OUTPUT" "$FINAL_OUTPUT"
         rm "$INPUT"
