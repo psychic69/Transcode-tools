@@ -167,7 +167,7 @@ function transcode {
 local gq=28
 local look_depth=60
 local bf=7
-local space_svg=0.3   #This means need a min 30% reduction to accept this file"
+local space_svg=0.2   #This means need a min 20% reduction to accept this file"
 
 
 #First things first.  Need to check what type of audio we are dealing with
@@ -261,15 +261,17 @@ if [[ -f "$OUTPUT" ]]; then
     IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
     HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$OUTPUT")
 
+    # Calculate savings percentage
+    SAVINGS=$(echo "100 - ($NEW_SIZE / $OLD_SIZE * 100)" | bc -l)
+
     if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
-        SAVINGS=$(echo "100 - ($NEW_SIZE / $OLD_SIZE * 100)" | bc -l)
         write_log "INFO" "Safety checks passed. Savings: $(printf '%.2f' $SAVINGS)%. Replacing original."
         FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
         mv "$OUTPUT" "$FINAL_OUTPUT"
         rm "$INPUT"
     else
         [ "$IS_DURATION_VALID" -eq 0 ] && write_log "WARN" "Duration mismatch: Orig $ORIG_DURATION vs New $NEW_DURATION"
-        [ "$IS_SIZE_VALID" -eq 0 ] && write_log "INFO" "Target 30% savings not met. Keeping original."
+        [ "$IS_SIZE_VALID" -eq 0 ] && write_log "WARN" "$BASENAME - Savings only $(printf '%.2f' $SAVINGS)% (threshold: $(printf '%.2f' $space_svg)0%). File kept."
         [ -z "$HAS_V_TRACK" ] && write_log "ERROR" "Muxing error: No video track found in output."
         rm -f "$OUTPUT"
         # Mark original file as already processed (with -OPT flag) so it won't be retried
