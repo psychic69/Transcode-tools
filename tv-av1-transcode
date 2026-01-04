@@ -309,6 +309,11 @@ if [ ! -w "$TV_OUTPUT_DIR" ]; then
   fi
 fi
 
+# Clean up all stale temporary files from previous interrupted runs
+write_log INFO "Cleaning up any stale temporary files from previous runs..."
+find "$TV_OUTPUT_DIR" -name "*.av1.tmp*" -type f -delete
+write_log INFO "Cleanup complete."
+
 # Recursive function to traverse directory structure and transcode files
 process_directory() {
     local input_path="$1"
