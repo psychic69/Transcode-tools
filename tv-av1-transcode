@@ -222,11 +222,14 @@ ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=nopr
 
 # Determine subtitle codec handling
 if [[ -z "$S_CODEC" ]]; then
+    write_log "INFO" "No subtitles found."
     SUBTITLE_OPTS="-map 0:s?"
-elif [[ "$S_CODEC" == "mov_text" || "$S_CODEC" == "subrip" || "$S_CODEC" == "ass" || "$S_CODEC" == "ssa" ]]; then
+elif [[ "$S_CODEC" == "subrip" || "$S_CODEC" == "ass" || "$S_CODEC" == "ssa" || "$S_CODEC" == "dvb_subtitle" || "$S_CODEC" == "dvb_teletext" ]]; then
+    # These codecs are safely copyable to MKV
+    write_log "INFO" "Subtitle codec is $S_CODEC. Copying subtitles as-is."
     SUBTITLE_OPTS="-map 0:s? -c:s copy"
 else
-    # For unsupported formats like tx3g (Apple timed text), convert to ass
+    # For unsupported formats like mov_text/tx3g (Apple timed text), webvtt, etc., convert to ass
     write_log "INFO" "Subtitle codec is $S_CODEC. Converting to ASS format for MKV compatibility."
     SUBTITLE_OPTS="-map 0:s? -c:s ass"
 fi
