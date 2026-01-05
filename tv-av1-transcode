@@ -16,11 +16,12 @@ ALLOWED_EXT="mp4,mkv"
 
 # Check if no arguments provided
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [-debug] [-noplex] <input_dir> [output_dir]"
+    echo "Usage: $0 [-debug] [-noplex] [-sonarr] <input_dir> [output_dir]"
     echo ""
     echo "Arguments:"
     echo "  -debug       Enable debug mode to log FFmpeg output (optional)"
     echo "  -noplex      Skip Plex library update (optional)"
+    echo "  -sonarr      Notify Sonarr after transcoding (optional)"
     echo "  input_dir    Directory containing media files to transcode"
     echo "  output_dir   Output directory for transcoded files (defaults to input_dir if not specified)"
     echo ""
@@ -30,18 +31,22 @@ if [[ $# -eq 0 ]]; then
     echo "  $0 -debug /media/tv"
     echo "  $0 -debug /media/tv /media/tv-transcoded"
     echo "  $0 -noplex /media/tv"
-    echo "  $0 -debug -noplex /media/tv /media/tv-transcoded"
+    echo "  $0 -sonarr /media/tv"
+    echo "  $0 -debug -noplex -sonarr /media/tv /media/tv-transcoded"
     exit 1
 fi
 
 # Parse command line arguments
 DEBUG=0
 NOPLEX=0
+SONARR=0
 for arg in "$@"; do
     if [[ "$arg" == "-debug" ]]; then
         DEBUG=1
     elif [[ "$arg" == "-noplex" ]]; then
         NOPLEX=1
+    elif [[ "$arg" == "-sonarr" ]]; then
+        SONARR=1
     fi
 done
 
@@ -50,7 +55,7 @@ TV_INPUT_DIR=""
 TV_OUTPUT_DIR=""
 arg_count=0
 for arg in "$@"; do
-    if [[ "$arg" != "-debug" && "$arg" != "-noplex" ]]; then
+    if [[ "$arg" != "-debug" && "$arg" != "-noplex" && "$arg" != "-sonarr" ]]; then
         ((arg_count++))
         if [[ $arg_count -eq 1 ]]; then
             TV_INPUT_DIR="$arg"
@@ -383,12 +388,16 @@ write_log INFO "Cleanup complete."
 # Process the input directory recursively
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-# Notify Sonarr (TV)
-curl -s http://$PLEX_IP:8989/api/v3/command \
-    -X POST \
-    -d '{"name": "DownloadedEpisodesScan", "path": "/downloads/converted"}' \
-    -H "X-Api-Key: $SONARR_API_KEY" \
-    -H "Content-Type: application/json"
+# Notify Sonarr (TV) if -sonarr flag is set
+if [[ $SONARR -eq 1 ]]; then
+    write_log "INFO" "Notifying Sonarr of new episodes..."
+    curl -s http://$PLEX_IP:8989/api/v3/command \
+        -X POST \
+        -d '{"name": "DownloadedEpisodesScan", "path": "/downloads/converted"}' \
+        -H "X-Api-Key: $SONARR_API_KEY" \
+        -H "Content-Type: application/json"
+    write_log "INFO" "Sonarr notification sent."
+fi
 
 
 # All transcoding complete - update Plex library (unless -noplex flag is set)
