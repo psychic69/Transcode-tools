@@ -68,6 +68,22 @@ else
     FFMPEG_REDIRECT=">> $LOG_DIR/logfile-$(date +%m-%d-%y) 2>&1"
 fi
 
+# Load and validate parameter.ini
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARAM_FILE="$SCRIPT_DIR/parameter.ini"
+
+if [[ ! -f "$PARAM_FILE" ]]; then
+    echo "ERROR: parameter.ini not found at $PARAM_FILE"
+    exit 1
+fi
+
+source "$PARAM_FILE"
+
+if [[ -z "$SONARR_API_KEY" ]]; then
+    echo "ERROR: SONARR_API_KEY not found in $PARAM_FILE"
+    exit 1
+fi
+
 # ************************************************
 function write_log {
 # This function will write log information to a file
@@ -366,6 +382,14 @@ write_log INFO "Cleanup complete."
 
 # Process the input directory recursively
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+
+# Notify Sonarr (TV)
+curl -s http://$PLEX_IP:8989/api/v3/command \
+    -X POST \
+    -d '{"name": "DownloadedEpisodesScan", "path": "/downloads/converted"}' \
+    -H "X-Api-Key: $SONARR_API_KEY" \
+    -H "Content-Type: application/json"
+
 
 # All transcoding complete - update Plex library (unless -noplex flag is set)
 if [[ $NOPLEX -eq 0 ]]; then
