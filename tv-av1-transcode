@@ -292,28 +292,6 @@ fi
 
 }
 
-
-# Main Script Body ________________________________________________
-
-check_helper_bin
-write_log INFO "Beginning of Script Execution, loading modules"
-write_log INFO "=========================================="
-
-#Incoming encode files to pass to transcode block
-
-# Check and create output dir once before processing files if needed
-if [ ! -w "$TV_OUTPUT_DIR" ]; then
-  mkdir -p "$TV_OUTPUT_DIR"
-  if [ ! -w "$TV_OUTPUT_DIR" ]; then
-    write_log ERROR "Could not create $TV_OUTPUT_DIR"
-  fi
-fi
-
-# Clean up all stale temporary files from previous interrupted runs
-write_log INFO "Cleaning up any stale temporary files from previous runs..."
-find "$TV_OUTPUT_DIR" -name "*.av1.tmp*" -type f -delete
-write_log INFO "Cleanup complete."
-
 # Recursive function to traverse directory structure and transcode files
 process_directory() {
     local input_path="$1"
@@ -323,6 +301,11 @@ process_directory() {
     if [ ! -d "$output_path" ]; then
         mkdir -p "$output_path"
     fi
+
+    # --- INSERT THE DOT FIX HERE ---  This fix here if processing an obfucated file with only a dot (add faux mkv)
+    # Renames "File." to "File.mkv" so the script recognizes it
+    find "$input_path" -type f -name "*." -exec mv {} {}mkv \;
+    # -------------------------------
 
     # Loop through files and directories in the current level
     for item in "$input_path"/*; do
@@ -356,6 +339,30 @@ process_directory() {
         fi
     done
 }
+
+
+# Main Script Body ________________________________________________
+
+check_helper_bin
+write_log INFO "Beginning of Script Execution, loading modules"
+write_log INFO "=========================================="
+
+#Incoming encode files to pass to transcode block
+
+# Check and create output dir once before processing files if needed
+if [ ! -w "$TV_OUTPUT_DIR" ]; then
+  mkdir -p "$TV_OUTPUT_DIR"
+  if [ ! -w "$TV_OUTPUT_DIR" ]; then
+    write_log ERROR "Could not create $TV_OUTPUT_DIR"
+  fi
+fi
+
+# Clean up all stale temporary files from previous interrupted runs
+write_log INFO "Cleaning up any stale temporary files from previous runs..."
+find "$TV_OUTPUT_DIR" -name "*.av1.tmp*" -type f -delete
+write_log INFO "Cleanup complete."
+
+
 
 # Process the input directory recursively
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
