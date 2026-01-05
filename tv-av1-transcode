@@ -403,6 +403,15 @@ write_log INFO "Cleanup complete."
 # Process the input directory recursively
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
+# Clean up empty directories from input tree (only if input and output dirs are different)
+if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+    write_log "INFO" "Cleaning up empty directories from input tree..."
+    # Remove empty directories, starting from deepest level and working up
+    # This ensures we only delete truly empty directories and their empty parents
+    find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
+    write_log "INFO" "Empty directory cleanup complete."
+fi
+
 # Notify Sonarr (TV) if -sonarr flag is set
 if [[ $SONARR -eq 1 ]]; then
     write_log "INFO" "Notifying Sonarr of new episodes..."
