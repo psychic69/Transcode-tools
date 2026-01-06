@@ -277,15 +277,16 @@ write_log "INFO" "AUDIO_OPTS: $AUDIO_OPTS"
 
 # --- 6. Execution ---
 write_log "INFO" "Executing FFmpeg command..."
+FFMPEG_EXIT_CODE=0
 if [[ "$V_CODEC" == "av1" ]]; then
-    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT"
+    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
 else
     eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv \
-      -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT"
+      -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -movflags +faststart \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
 fi
 
-if [ $? -ne 0 ]; then
-    write_log "ERROR" "FFmpeg process crashed for $BASENAME."
+if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
+    write_log "ERROR" "FFmpeg process crashed for $BASENAME with exit code $FFMPEG_EXIT_CODE."
     rm -f "$OUTPUT"
     return
 fi
