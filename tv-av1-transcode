@@ -412,6 +412,11 @@ if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
     write_log "INFO" "Empty directory cleanup complete."
 fi
 
+# Clean up empty directories from output tree
+write_log "INFO" "Cleaning up empty directories from output tree..."
+find "$TV_OUTPUT_DIR" -mindepth 1 -type d -empty -delete
+write_log "INFO" "Output directory cleanup complete."
+
 # Notify Sonarr (TV) if -sonarr flag is set
 if [[ $SONARR -eq 1 ]]; then
     write_log "INFO" "Notifying Sonarr of new episodes..."
