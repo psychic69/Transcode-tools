@@ -246,15 +246,18 @@ if [[ "$V_CODEC" == "av1" && ("$A_CODEC" == "aac" || "$A_CODEC" == "opus") ]]; t
 fi
 
 # --- 4. Video Strategy ---
+# Get input frame rate to preserve timing
+INPUT_FPS=$($FFPROBE -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$INPUT")
+
 if [[ "$V_CODEC" == "av1" ]]; then
     write_log "INFO" "Video is AV1. Setting Video to Passthrough."
-    VIDEO_OPTS="-c:v copy -vsync cfr"
+    VIDEO_OPTS="-c:v copy -fps_mode cfr -r $INPUT_FPS"
 else
     PIX_FMT=$($FFPROBE -v error -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     [[ "$PIX_FMT" == *"10le"* ]] && VF_CHAIN="format=qsv" || VF_CHAIN="format=qsv,scale_qsv=format=p010"
 
-    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -vsync cfr"
-    write_log "INFO" "Video is $V_CODEC ($PIX_FMT). Initializing Intel QSV AV1 10-bit Encode."
+    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -fps_mode cfr -r $INPUT_FPS"
+    write_log "INFO" "Video is $V_CODEC ($PIX_FMT). Input FPS: $INPUT_FPS. Initializing Intel QSV AV1 10-bit Encode."
 fi
 
 # --- 5. Audio Strategy ---
