@@ -61,42 +61,56 @@ function check_helper_bin {
 function transcode {
     local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
+    
+    write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
+    write_log INFO "=========================================="
 
-    # FIX: Hide from Sonarr by using leading dot and extensionless name
     OUTPUT="$2/.${BASENAME%.*}.av1.tmp"
     rm -f "$2/.${BASENAME%.*}.av1.tmp"*
 
+    # --- Identify Metadata ---
     V_CODEC=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     A_CODEC=$($FFPROBE -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
     A_CHANNELS=$($FFPROBE -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
     S_CODEC=$($FFPROBE -v error -select_streams s:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
     ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
 
-    # Subtitles
-    if [[ -z "$S_CODEC" ]]; then SUBTITLE_OPTS="-map 0:s?"; elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then SUBTITLE_OPTS="-map 0:s? -c:s copy"; else SUBTITLE_OPTS="-map 0:s? -c:s ass"; fi
-
-    # Skip Logic
-    if [[ "$V_CODEC" == "av1" && ("$A_CODEC" == "aac" || "$A_CODEC" == "opus") ]]; then
-        FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.${EXT}"
-        [[ "$INPUT" != "$FINAL_OUTPUT" ]] && mv "$INPUT" "$FINAL_OUTPUT"
-        return
+    # --- Subtitle Logging ---
+    if [[ -z "$S_CODEC" ]]; then 
+        write_log INFO "No subtitles found."
+        SUBTITLE_OPTS="-map 0:s?"
+    elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then 
+        write_log INFO "Subtitle codec is $S_CODEC. Copying subtitles as-is."
+        SUBTITLE_OPTS="-map 0:s? -c:s copy"
+    else 
+        write_log INFO "Subtitle codec is $S_CODEC. Converting to ASS format for MKV compatibility."
+        SUBTITLE_OPTS="-map 0:s? -c:s ass"
     fi
 
-    # Video Strategy - FIX for 50fps and Muxing
+    # --- Video Strategy Logging ---
     if [[ "$V_CODEC" == "av1" ]]; then
+        write_log INFO "Video is already AV1. Setting Video to Passthrough."
         VIDEO_OPTS="-c:v copy"
     else
-        # Use vpp_qsv to force 50fps hardware side + 10bit P010
+        write_log INFO "Video is $V_CODEC. Initializing Intel QSV AV1 10-bit Encode (Strict 50fps)."
         VF_CHAIN="vpp_qsv,fps=fps=50,format=p010"
         VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -max_interleave_delta 0 -reserve_index_space 100k"
     fi
 
-    # Audio Strategy
-    case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
-    if [[ "$A_CODEC" == "aac" ]]; then AUDIO_OPTS="-c:a copy"; else AUDIO_OPTS="-c:a libopus -b:a $A_BIT -mapping_family 1"; fi
+    # --- Audio Strategy Logging ---
+    if [[ "$A_CODEC" == "aac" ]]; then
+        write_log INFO "Audio is AAC. Setting Audio to Passthrough."
+        AUDIO_OPTS="-c:a copy"
+    else
+        case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
+        write_log INFO "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus."
+        AUDIO_OPTS="-c:a libopus -b:a $A_BIT -mapping_family 1"
+    fi
 
-    # Execution - FIX added -f matroska
+    write_log INFO "Executing FFmpeg command..."
+    
+    # --- Execution ---
     FFMPEG_EXIT_CODE=0
     if [[ "$V_CODEC" == "av1" ]]; then
         eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
@@ -104,25 +118,39 @@ function transcode {
         eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     fi
 
-    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then write_log "ERROR" "FFmpeg crashed Code: $FFMPEG_EXIT_CODE"; rm -f "$OUTPUT"; return; fi
+    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
+        write_log ERROR "FFmpeg crashed for $BASENAME. Code: $FFMPEG_EXIT_CODE"
+        rm -f "$OUTPUT"
+        return
+    fi
 
-    # Safety Checks
+    # --- Safety Checks & Savings Logging ---
     if [[ -f "$OUTPUT" ]]; then
         NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT")
         DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
         IS_DURATION_VALID=$(echo "$DURATION_DIFF < 2.0" | bc -l)
-        OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$OUTPUT")
+        
+        OLD_SIZE=$(stat -c%s "$INPUT")
+        NEW_SIZE=$(stat -c%s "$OUTPUT")
+        SAVINGS=$(echo "100 - ($NEW_SIZE / $OLD_SIZE * 100)" | bc -l)
+        OLD_SIZE_MB=$(echo "$OLD_SIZE / 1048576" | bc)
+        NEW_SIZE_MB=$(echo "$NEW_SIZE / 1048576" | bc)
+        
         THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
         IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
         HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$OUTPUT")
 
         if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
+            write_log INFO "Safety checks passed. Savings: $(printf '%.2f' $SAVINGS)% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
             mv "$OUTPUT" "$FINAL_OUTPUT"
             rm "$INPUT"
         else
-            write_log "WARN" "Safety check failed. Marking original."
-            rm -f "$OUTPUT"; mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
+            if [[ "$IS_DURATION_VALID" -eq 0 ]]; then write_log WARN "Duration mismatch: $ORIG_DURATION vs $NEW_DURATION"; fi
+            if [[ "$IS_SIZE_VALID" -eq 0 ]]; then write_log WARN "Insufficient savings ($(printf '%.2f' $SAVINGS)%). Keeping original."; fi
+            if [[ -z "$HAS_V_TRACK" ]]; then write_log ERROR "No video track found in output."; fi
+            rm -f "$OUTPUT"
+            mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
         fi
     fi
 }
