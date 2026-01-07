@@ -3,7 +3,7 @@
 JQ=/usr/bin/jq
 FFMPEG="/usr/lib/jellyfin-ffmpeg/ffmpeg" 
 FFPROBE="/usr/lib/jellyfin-ffmpeg/ffprobe"
-MEDIAINFO=/usr/bin/mediainfo
+MEDIAINFO="/usr/bin/mediainfo"
 DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
@@ -17,9 +17,9 @@ fi
 # Parse command line arguments
 DEBUG=0; NOPLEX=0; SONARR=0
 for arg in "$@"; do
-    [[ "$arg" == "-debug" ]] && DEBUG=1
-    [[ "$arg" == "-noplex" ]] && NOPLEX=1
-    [[ "$arg" == "-sonarr" ]] && SONARR=1
+    if [[ "$arg" == "-debug" ]]; then DEBUG=1; fi
+    if [[ "$arg" == "-noplex" ]]; then NOPLEX=1; fi
+    if [[ "$arg" == "-sonarr" ]]; then SONARR=1; fi
 done
 
 # Set directory parameters
@@ -27,49 +27,44 @@ TV_INPUT_DIR=""; TV_OUTPUT_DIR=""; arg_count=0
 for arg in "$@"; do
     if [[ "$arg" != "-debug" && "$arg" != "-noplex" && "$arg" != "-sonarr" ]]; then
         ((arg_count++))
-        [[ $arg_count -eq 1 ]] && TV_INPUT_DIR="$arg"
-        [[ $arg_count -eq 2 ]] && TV_OUTPUT_DIR="$arg"
+        if [[ $arg_count -eq 1 ]]; then TV_INPUT_DIR="$arg"; elif [[ $arg_count -eq 2 ]]; then TV_OUTPUT_DIR="$arg"; fi
     fi
 done
 TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
 
-# Set FFmpeg output redirection
-if [[ $DEBUG -eq 0 ]]; then
-    FFMPEG_REDIRECT="> /dev/null 2>&1"
-else
-    FFMPEG_REDIRECT=">> $LOG_DIR/logfile-$(date +%m-%d-%y) 2>&1"
-fi
+if [[ $DEBUG -eq 0 ]]; then FFMPEG_REDIRECT="> /dev/null 2>&1"; else FFMPEG_REDIRECT=">> $LOG_DIR/logfile-$(date +%m-%d-%y) 2>&1"; fi
 
-# Load parameter.ini
+# Load and validate parameter.ini
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARAM_FILE="$SCRIPT_DIR/parameter.ini"
-[[ -f "$PARAM_FILE" ]] && source "$PARAM_FILE"
+if [[ ! -f "$PARAM_FILE" ]]; then echo "ERROR: parameter.ini not found"; exit 1; fi
+source "$PARAM_FILE"
 
+# ************************************************
 function write_log {
-    local short_date=$(date "+%m-%d-%y")
-    local short_time=$(date "+%H:%M")
-    local log_file="$LOG_DIR/logfile-$short_date"
-    echo "[$1] ($short_date, $short_time): $2" >> "$log_file"
-    [[ "$1" == "ERROR" ]] && exit 1
+    local short_date=$(date "+%m-%d-%y"); local short_time=$(date "+%H:%M"); local log_file="$LOG_DIR/logfile-$short_date"
+    touch "$log_file"
+    case $1 in
+        WARN | INFO | ERROR )
+            echo "[$1] ($short_date, $short_time): $2" >> "$log_file"
+            if [ "$1" = "ERROR" ]; then exit 1; fi ;;
+    esac
 }
 
-function transcode {
-    local gq=28
-    local look_depth=60
-    local bf=7
-    local space_svg=0.2 
+# ************************************************
+function check_helper_bin {
+    if [ ! -x "$JQ" ] || [ ! -x "$MEDIAINFO" ] || [ ! -x "$FFPROBE" ] || [ ! -x "$FFMPEG" ]; then write_log ERROR "Bins missing"; fi
+    if [ ! -w "$TV_INPUT_DIR" ] || [ ! -w "$TV_OUTPUT_DIR" ]; then write_log ERROR "Perms issue"; fi
+}
 
-    INPUT="$1"
-    BASENAME=$(basename "$INPUT")
-    EXT="${BASENAME##*.}"
-    
-    write_log INFO "=========================================="
+# ************************************************
+function transcode {
+    local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
+    INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
     write_log INFO "Processing: $BASENAME"
 
-    # FIX 1: Use a leading DOT and NO video extension for the temp file. 
-    # This makes the file invisible to Sonarr's media scanner.
+    # FIX: Hide from Sonarr by using leading dot and extensionless name
     OUTPUT="$2/.${BASENAME%.*}.av1.tmp"
-
     rm -f "$2/.${BASENAME%.*}.av1.tmp"*
 
     V_CODEC=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT")
@@ -78,118 +73,91 @@ function transcode {
     S_CODEC=$($FFPROBE -v error -select_streams s:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
     ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
 
-    # Subtitle Logic
-    if [[ -z "$S_CODEC" ]]; then
-        SUBTITLE_OPTS="-map 0:s?"
-    elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then
-        SUBTITLE_OPTS="-map 0:s? -c:s copy"
-    else
-        SUBTITLE_OPTS="-map 0:s? -c:s ass"
+    # Subtitles
+    if [[ -z "$S_CODEC" ]]; then SUBTITLE_OPTS="-map 0:s?"; elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then SUBTITLE_OPTS="-map 0:s? -c:s copy"; else SUBTITLE_OPTS="-map 0:s? -c:s ass"; fi
+
+    # Skip Logic
+    if [[ "$V_CODEC" == "av1" && ("$A_CODEC" == "aac" || "$A_CODEC" == "opus") ]]; then
+        FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.${EXT}"
+        [[ "$INPUT" != "$FINAL_OUTPUT" ]] && mv "$INPUT" "$FINAL_OUTPUT"
+        return
     fi
 
-    # FIX 2: Strict 50fps + 10-bit QSV Chain
-    # We force 'fps=50' and 'format=p010' (10-bit) within the QSV hardware filter
-    # 'fps_mode cfr' ensures the 23min duration is preserved.
-    # 'max_interleave_delta 0' prevents the "No video track" muxing error.
+    # Video Strategy - FIX for 50fps and Muxing
     if [[ "$V_CODEC" == "av1" ]]; then
         VIDEO_OPTS="-c:v copy"
     else
+        # Use vpp_qsv to force 50fps hardware side + 10bit P010
         VF_CHAIN="vpp_qsv,fps=fps=50,format=p010"
         VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -max_interleave_delta 0 -reserve_index_space 100k"
     fi
 
     # Audio Strategy
-    if [[ "$A_CODEC" == "aac" ]]; then
-        AUDIO_OPTS="-c:a copy"
-    else
-        case $A_CHANNELS in
-            2) AUDIO_OPTS="-c:a libopus -b:a 128k" ;;
-            6) AUDIO_OPTS="-c:a libopus -b:a 256k -mapping_family 1" ;;
-            *) AUDIO_OPTS="-c:a libopus -b:a 128k" ;;
-        esac
-    fi
+    case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
+    if [[ "$A_CODEC" == "aac" ]]; then AUDIO_OPTS="-c:a copy"; else AUDIO_OPTS="-c:a libopus -b:a $A_BIT -mapping_family 1"; fi
 
-    # Execution
+    # Execution - FIX added -f matroska
     FFMPEG_EXIT_CODE=0
     if [[ "$V_CODEC" == "av1" ]]; then
-        eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+        eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     else
-        eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+        eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     fi
 
-    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
-        write_log "ERROR" "FFmpeg crashed for $BASENAME. Code: $FFMPEG_EXIT_CODE"
-        rm -f "$OUTPUT"
-        return
-    fi
+    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then write_log "ERROR" "FFmpeg crashed Code: $FFMPEG_EXIT_CODE"; rm -f "$OUTPUT"; return; fi
 
     # Safety Checks
     if [[ -f "$OUTPUT" ]]; then
         NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT")
         DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
         IS_DURATION_VALID=$(echo "$DURATION_DIFF < 2.0" | bc -l)
-
-        OLD_SIZE=$(stat -c%s "$INPUT")
-        NEW_SIZE=$(stat -c%s "$OUTPUT")
+        OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$OUTPUT")
         THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
         IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
         HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$OUTPUT")
 
         if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
             FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
-            # FIX 3: Atomic move. The file only becomes visible to Sonarr AFTER it is renamed to .mkv
             mv "$OUTPUT" "$FINAL_OUTPUT"
             rm "$INPUT"
-            write_log INFO "Success: File replaced with AV1 version."
         else
-            [[ "$IS_DURATION_VALID" -eq 0 ]] && write_log "WARN" "Duration mismatch: $ORIG_DURATION vs $NEW_DURATION"
-            [[ -z "$HAS_V_TRACK" ]] && write_log "ERROR" "No video track found."
-            rm -f "$OUTPUT"
-            mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
-            write_log INFO "Marked as -OPT (failed checks)."
+            write_log "WARN" "Safety check failed. Marking original."
+            rm -f "$OUTPUT"; mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
         fi
     fi
 }
 
+# Recursive Process
 process_directory() {
-    local input_path="$1"
-    local output_path="$2"
-    mkdir -p "$output_path"
-    
-    # Clean up empty extension files
+    local input_path="$1"; local output_path="$2"
+    if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
     find "$input_path" -type f -name "*." -exec mv {} {}mkv \;
-
     for item in "$input_path"/*; do
-        [[ ! -e "$item" ]] && continue
-        if [ -d "$item" ]; then
-            process_directory "$item" "$output_path/$(basename "$item")"
+        if [ ! -e "$item" ]; then continue; fi
+        if [ -d "$item" ]; then process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
-            filename=$(basename "$item")
-            ext="${filename##*.}"
-            [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]] && continue
-            [[ "$filename" == *"-OPT"* ]] && continue
+            filename=$(basename "$item"); ext="${filename##*.}"
+            if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]] || [[ "$filename" == *"-OPT"* ]]; then continue; fi
             transcode "$item" "$output_path"
         fi
     done
 }
 
-# MAIN
-mkdir -p "$TV_OUTPUT_DIR"
+# MAIN BODY
+check_helper_bin
+write_log INFO "Beginning Execution"
+if [ ! -w "$TV_OUTPUT_DIR" ]; then mkdir -p "$TV_OUTPUT_DIR"; fi
 find "$TV_OUTPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-# Clean up empty dirs
-[[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]] && find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
+# Cleanup Dirs
+if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete; fi
 find "$TV_OUTPUT_DIR" -mindepth 1 -type d -empty -delete
 
-# Sonarr Notification
+# Notify Sonarr
 if [[ $SONARR -eq 1 ]]; then
-    curl -s http://$PLEX_IP:8989/api/v3/command -X POST \
-        -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$TV_OUTPUT_DIR\"}" \
-        -H "X-Api-Key: $SONARR_API_KEY" -H "Content-Type: application/json"
+    curl -s http://$PLEX_IP:8989/api/v3/command -X POST -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$TV_OUTPUT_DIR\"}" -H "X-Api-Key: $SONARR_API_KEY" -H "Content-Type: application/json"
 fi
 
 # Plex Update
-if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then
-    "$SCRIPT_DIR/Plex-update"
-fi
+if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then "$SCRIPT_DIR/Plex-update"; fi
