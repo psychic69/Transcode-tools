@@ -279,10 +279,10 @@ write_log "INFO" "AUDIO_OPTS: $AUDIO_OPTS"
 write_log "INFO" "Executing FFmpeg command..."
 FFMPEG_EXIT_CODE=0
 if [[ "$V_CODEC" == "av1" ]]; then
-    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+    eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 -vsync cfr $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
 else
     eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv \
-      -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+      -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 -vsync cfr $VIDEO_OPTS $AUDIO_OPTS \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
 fi
 
 if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
