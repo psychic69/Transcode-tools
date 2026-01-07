@@ -255,9 +255,9 @@ if [[ "$V_CODEC" == "av1" ]]; then
 else
     PIX_FMT=$($FFPROBE -v error -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     # Use vpp_qsv for hardware-accelerated frame normalization and fps filter to maintain constant frame rate
-    VF_CHAIN="vpp_qsv,fps=fps=$INPUT_FPS,format=p010le"
+    VF_CHAIN="vpp_qsv,fps=fps=$INPUT_FPS,format=p010"
 
-    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -fps_mode cfr -reserve_index_space 100k"
+    VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -max_interleave_delta 0 -reserve_index_space 100k"
     write_log "INFO" "Video is $V_CODEC ($PIX_FMT). Input FPS: $INPUT_FPS. Using vpp_qsv frame normalization. Initializing Intel QSV AV1 10-bit Encode."
 fi
 
