@@ -8,6 +8,21 @@ DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
 
+# ************************************************
+# Function to clean up on exit/interrupt (Trap)
+# ************************************************
+function cleanup_on_exit {
+    if [[ -n "$TEMP_IN_DIR" && -f "$TEMP_IN_DIR" ]]; then
+        # Use a simple echo here as write_log might be interrupted
+        echo "[WARN] Script interrupted. Removing incomplete file: $TEMP_IN_DIR"
+        rm -f "$TEMP_IN_DIR"
+    fi
+    exit 1
+}
+
+# Register Trap for manual interrupts (Ctrl+C) and system termination
+trap cleanup_on_exit SIGINT SIGTERM
+
 # Check if no arguments provided
 if [[ $# -eq 0 ]]; then
     echo "Usage: $0 [-debug] [-noplex] [-sonarr] <input_dir> [output_dir]"
@@ -59,22 +74,19 @@ function check_helper_bin {
 
 # ************************************************
 function transcode {
-    # Settings
     local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
     
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
-    # Identify the input directory for staging
     IN_DIR=$(dirname "$INPUT")
     
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
 
-    # FIX: Write the temp file to the INPUT directory (hidden with a dot)
+    # Write temp file to INPUT directory (hidden) to keep it away from Sonarr
     TEMP_IN_DIR="$IN_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$IN_DIR/.${BASENAME%.*}.av1.tmp"*
 
-    # --- 1. Identify Metadata ---
     V_CODEC=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     A_CODEC=$($FFPROBE -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
     A_CHANNELS=$($FFPROBE -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
@@ -82,7 +94,7 @@ function transcode {
     ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
     ORIG_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$INPUT")
 
-    # --- 2. Subtitle Strategy ---
+    # Subtitle Strategy
     if [[ -z "$S_CODEC" ]]; then
         write_log INFO "No subtitles found."
         SUBTITLE_OPTS="-map 0:s?"
@@ -94,18 +106,17 @@ function transcode {
         SUBTITLE_OPTS="-map 0:s? -c:s ass"
     fi
 
-    # --- 3. Video Strategy ---
+    # Video Strategy
     if [[ "$V_CODEC" == "av1" ]]; then
         write_log INFO "Video is already AV1. Setting Video to Passthrough."
         VIDEO_OPTS="-c:v copy"
     else
         write_log INFO "Video is $V_CODEC. Initializing Intel QSV AV1 10-bit Encode (Strict 50fps)."
-        # Force 50fps and use CFR to maintain strict 23-minute duration
         VF_CHAIN="vpp_qsv,fps=fps=50,format=p010"
         VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -max_interleave_delta 0 -reserve_index_space 100k"
     fi
 
-    # --- 4. Audio Strategy ---
+    # Audio Strategy
     if [[ "$A_CODEC" == "aac" ]]; then
         write_log INFO "Audio is AAC. Setting Audio to Passthrough."
         AUDIO_OPTS="-c:a copy"
@@ -115,7 +126,7 @@ function transcode {
         AUDIO_OPTS="-c:a libopus -b:a $A_BIT -mapping_family 1"
     fi
 
-    # --- 5. Execution ---
+    # Execution
     write_log INFO "Executing FFmpeg command..."
     FFMPEG_EXIT_CODE=0
     if [[ "$V_CODEC" == "av1" ]]; then
@@ -130,9 +141,8 @@ function transcode {
         return
     fi
 
-    # --- 6. Safety Checks & Savings Logic ---
+    # Safety Checks & Savings Logic
     if [[ -f "$TEMP_IN_DIR" ]]; then
-        # Check Frame Counts
         NEW_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
         
         if [[ "$NEW_FRAMES" == "N/A" || -z "$NEW_FRAMES" ]]; then
@@ -145,30 +155,27 @@ function transcode {
             if [ "$FRAME_DIFF" -lt 5 ]; then IS_DURATION_VALID=1; else IS_DURATION_VALID=0; fi
         fi
 
-        OLD_SIZE=$(stat -c%s "$INPUT")
-        NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
+        OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
         THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
         IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
         HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$TEMP_IN_DIR")
 
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
-        OLD_SIZE_MB=$((OLD_SIZE / 1048576))
-        NEW_SIZE_MB=$((NEW_SIZE / 1048576))
+        OLD_SIZE_MB=$((OLD_SIZE / 1048576)); NEW_SIZE_MB=$((NEW_SIZE / 1048576))
 
         if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
             write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
             
-            # Atomic move from Staging (Input) to Monitored (Output)
+            # Atomic move from Input Staging to Monitored Output
             mv "$TEMP_IN_DIR" "$FINAL_OUTPUT"
             rm "$INPUT"
         else
             [[ "$IS_DURATION_VALID" -eq 0 ]] && write_log WARN "Duration/Frame mismatch (Orig: $ORIG_FRAMES vs New: $NEW_FRAMES)"
             [[ "$IS_SIZE_VALID" -eq 0 ]] && write_log WARN "Insufficient savings (${SAVINGS}%). Keeping original."
-            [[ -z "$HAS_V_TRACK" ]] && write_log ERROR "No video track detected in output."
+            [[ -z "$HAS_V_TRACK" ]] && write_log ERROR "No video track detected."
             
             rm -f "$TEMP_IN_DIR"
-            # Move original to output even if failed to mark it as processed
             mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
             write_log INFO "Marked original as -OPT."
         fi
@@ -194,8 +201,12 @@ process_directory() {
 # MAIN BODY
 check_helper_bin
 write_log INFO "Beginning Execution"
-if [ ! -w "$TV_OUTPUT_DIR" ]; then mkdir -p "$TV_OUTPUT_DIR"; fi
+
+# Cleanup stale hidden temp files in both trees
+write_log INFO "Cleaning up stale temporary files..."
+find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 find "$TV_OUTPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
 # Cleanup Dirs
