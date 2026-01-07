@@ -291,23 +291,6 @@ if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
     return
 fi
 
-# Debug: Check if output file exists and its size
-if [[ -f "$OUTPUT" ]]; then
-    OUTPUT_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null)
-    write_log "INFO" "Output file created successfully. Size: $OUTPUT_SIZE bytes"
-else
-    write_log "WARN" "Output file not found at expected location: $OUTPUT"
-    write_log "WARN" "Expected output path: $2/${BASENAME%.*}.av1.tmp.mkv"
-    write_log "WARN" "Checking output directory for any .tmp files..."
-    find "$2" -name "*.tmp*" -type f 2>/dev/null | while read line; do
-        write_log "WARN" "Found temp file: $line"
-    done
-    write_log "WARN" "Checking for any recently modified .mkv files in output directory..."
-    find "$2" -name "*.mkv" -type f -mmin -5 2>/dev/null | while read line; do
-        write_log "WARN" "Found recently modified mkv: $line"
-    done
-fi
-
 # --- 7. Safety Checks & Logging ---
 if [[ -f "$OUTPUT" ]]; then
     NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT")
