@@ -63,14 +63,16 @@ function transcode {
     local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
     
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
+    # Identify the input directory for staging
+    IN_DIR=$(dirname "$INPUT")
     
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
 
-    # Hidden temp file to prevent Sonarr snatching
-    OUTPUT="$2/.${BASENAME%.*}.av1.tmp"
-    rm -f "$2/.${BASENAME%.*}.av1.tmp"*
+    # FIX: Write the temp file to the INPUT directory (hidden with a dot)
+    TEMP_IN_DIR="$IN_DIR/.${BASENAME%.*}.av1.tmp"
+    rm -f "$IN_DIR/.${BASENAME%.*}.av1.tmp"*
 
     # --- 1. Identify Metadata ---
     V_CODEC=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT")
@@ -117,41 +119,38 @@ function transcode {
     write_log INFO "Executing FFmpeg command..."
     FFMPEG_EXIT_CODE=0
     if [[ "$V_CODEC" == "av1" ]]; then
-        eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+        eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$TEMP_IN_DIR\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     else
-        eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$OUTPUT\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
+        eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$TEMP_IN_DIR\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     fi
 
     if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
         write_log ERROR "FFmpeg crashed for $BASENAME. Code: $FFMPEG_EXIT_CODE"
-        rm -f "$OUTPUT"
+        rm -f "$TEMP_IN_DIR"
         return
     fi
 
     # --- 6. Safety Checks & Savings Logic ---
-    if [[ -f "$OUTPUT" ]]; then
-        # Check Frame Counts (more reliable for 50fps than duration strings)
-        NEW_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$OUTPUT")
+    if [[ -f "$TEMP_IN_DIR" ]]; then
+        # Check Frame Counts
+        NEW_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
         
-        # Logic: If nb_frames is missing, fall back to duration (3s margin)
         if [[ "$NEW_FRAMES" == "N/A" || -z "$NEW_FRAMES" ]]; then
-            NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT")
+            NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
             DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
             IS_DURATION_VALID=$(echo "$DURATION_DIFF < 3.0" | bc -l)
         else
             FRAME_DIFF=$((ORIG_FRAMES - NEW_FRAMES))
-            FRAME_DIFF=${FRAME_DIFF#-} # Absolute value
-            # If we are within 5 frames of original, it's a perfect encode
+            FRAME_DIFF=${FRAME_DIFF#-} 
             if [ "$FRAME_DIFF" -lt 5 ]; then IS_DURATION_VALID=1; else IS_DURATION_VALID=0; fi
         fi
 
         OLD_SIZE=$(stat -c%s "$INPUT")
-        NEW_SIZE=$(stat -c%s "$OUTPUT")
+        NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
         THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
         IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
-        HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$OUTPUT")
+        HAS_V_TRACK=$($MEDIAINFO --Inform="Video;%Duration%" "$TEMP_IN_DIR")
 
-        # Savings Calculation
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
         OLD_SIZE_MB=$((OLD_SIZE / 1048576))
         NEW_SIZE_MB=$((NEW_SIZE / 1048576))
@@ -159,14 +158,17 @@ function transcode {
         if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 && -n "$HAS_V_TRACK" ]]; then
             write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             FINAL_OUTPUT="$2/${BASENAME%.*}-OPT.mkv"
-            mv "$OUTPUT" "$FINAL_OUTPUT"
+            
+            # Atomic move from Staging (Input) to Monitored (Output)
+            mv "$TEMP_IN_DIR" "$FINAL_OUTPUT"
             rm "$INPUT"
         else
             [[ "$IS_DURATION_VALID" -eq 0 ]] && write_log WARN "Duration/Frame mismatch (Orig: $ORIG_FRAMES vs New: $NEW_FRAMES)"
             [[ "$IS_SIZE_VALID" -eq 0 ]] && write_log WARN "Insufficient savings (${SAVINGS}%). Keeping original."
             [[ -z "$HAS_V_TRACK" ]] && write_log ERROR "No video track detected in output."
             
-            rm -f "$OUTPUT"
+            rm -f "$TEMP_IN_DIR"
+            # Move original to output even if failed to mark it as processed
             mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
             write_log INFO "Marked original as -OPT."
         fi
