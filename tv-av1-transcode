@@ -398,10 +398,17 @@ if [ ! -w "$TV_OUTPUT_DIR" ]; then
   fi
 fi
 
-# Clean up all stale temporary files from previous interrupted runs
-write_log INFO "Cleaning up any stale temporary files from previous runs..."
-find "$TV_OUTPUT_DIR" -name "*.av1.tmp*" -type f -delete
-write_log INFO "Cleanup complete."
+# Pre-processing cleanup: remove empty directories and stale temporary files
+write_log INFO "Cleaning up empty directories and stale temporary files from previous runs..."
+
+# First, remove any stale temporary files
+find "$TV_OUTPUT_DIR" -name "*.av1.tmp*" -type f -delete 2>/dev/null
+
+# Then, remove empty directories (starting from deepest level)
+# This cleans up leftover empty dir structure without touching dirs that have remnants
+find "$TV_OUTPUT_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
+
+write_log INFO "Pre-processing cleanup complete."
 
 
 
