@@ -133,18 +133,28 @@ function transcode {
    # --- 5. Execution ---
     write_log INFO "Executing FFmpeg command..."
     FFMPEG_EXIT_CODE=0
+
+    # Build the base command array
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-y")
     
-    # We remove the $FFMPEG_REDIRECT variable and use standard shell redirection
-    if [[ "$V_CODEC" == "av1" ]]; then
-        $FFMPEG -hide_banner -y -i "$INPUT" \
-            -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 \
-            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+    # Add HW acceleration flags if not already AV1
+    if [[ "$V_CODEC" != "av1" ]]; then
+        FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
+    fi
+
+    # Add shared parameters
+    FFMPEG_CMD+=("-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?")
+    FFMPEG_CMD+=($SUBTITLE_OPTS "-map_metadata" "0")
+    FFMPEG_CMD+=($VIDEO_OPTS $AUDIO_OPTS "-f" "matroska" "$TEMP_IN_DIR")
+
+    # Final Execution with conditional redirection
+    if [[ $DEBUG -eq 1 ]]; then
+        # Log to file if Debug is ON
+        "${FFMPEG_CMD[@]}" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
         FFMPEG_EXIT_CODE=$?
     else
-        $FFMPEG -hide_banner -y -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
-            -i "$INPUT" \
-            -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 \
-            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+        # Throw away output to /dev/null if Debug is OFF
+        "${FFMPEG_CMD[@]}" > /dev/null 2>&1
         FFMPEG_EXIT_CODE=$?
     fi
 }
