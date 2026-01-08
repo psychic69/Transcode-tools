@@ -96,8 +96,8 @@ function check_helper_bin {
 # ************************************************
 # ************************************************
 function transcode {
-    # Reduced look_depth from 60 to 40 for stability on very long/large files
-    local gq=28; local look_depth=40; local bf=7; local space_svg=0.2
+    # Settings: gq=28, bf=7, space_svg=0.2 (20% threshold)
+    local gq=28; local bf=7; local space_svg=0.2
     
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
     IN_DIR=$(dirname "$INPUT")
@@ -106,15 +106,15 @@ function transcode {
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
 
-    TEMP_IN_DIR="$IN_DIR/.${BASENAME%.*}.av1.tmp"
-    rm -f "$IN_DIR/.${BASENAME%.*}.av1.tmp"*
+    # Ensure temp file is in the output directory ($2) and properly hidden
+    TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
+    rm -f "$TEMP_IN_DIR"*
 
     # --- 1. Metadata Detection ---
     METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
 
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
-    PIX_FMT=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .pix_fmt' | head -n1)
     ORIG_FRAMES=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .nb_frames' | head -n1)
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
@@ -126,32 +126,39 @@ function transcode {
 
     write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
 
-    # --- 2. HARDENED SUBTITLE STRATEGY (Fixes Bitmap vs Text crash) ---
+    # --- 2. Subtitle Strategy (Hardened for Bitmap vs Text) ---
     S_CODEC_LOWER=$(echo "$S_CODEC" | tr '[:upper:]' '[:lower:]')
-
     if [[ -z "$S_CODEC" || "$S_CODEC" == "null" ]]; then 
         SUBTITLE_OPTS=("-map" "0:s?")
     elif [[ "$S_CODEC_LOWER" == *"pgs"* || "$S_CODEC_LOWER" == *"dvd"* || "$S_CODEC_LOWER" == *"hdmv"* ]]; then 
         write_log INFO "Detected Bitmap Subtitles ($S_CODEC). Forcing passthrough (copy)."
         SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
-    elif [[ "$S_CODEC_LOWER" =~ ^(subrip|ass|ssa|mov_text|text)$ ]]; then 
-        write_log INFO "Detected Text Subtitles ($S_CODEC). Forcing passthrough (copy)."
-        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
     else 
-        write_log INFO "Unknown Subtitle Type ($S_CODEC). Attempting generic copy."
+        # Default to copy for text/others to prevent bitmap-to-text cross-encoding errors
         SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
     fi
 
-    # --- 3. VIDEO STRATEGY ---
+    # --- 3. Video Strategy (Fixed for Code 218) ---
     if [[ "$V_CODEC" == "av1" ]]; then 
         VIDEO_OPTS=("-c:v" "copy")
     else
-        # Force software format conversion (nv12) before QSV to help with high-bitrate AVC sources
-        VF_CHAIN="format=nv12,vpp_qsv,format=p010,fps=fps=$SRC_FPS"
-        VIDEO_OPTS=("-vf" "$VF_CHAIN" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-look_ahead_depth" "$look_depth" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0" "-pix_fmt" "p010le" "-fps_mode" "cfr")
+        # Using software format conversion (p010le) to avoid VPP_QSV buffer errors on high-bitrate remuxes
+        VF_CHAIN="format=p010le,fps=fps=$SRC_FPS"
+        VIDEO_OPTS=(
+            "-vf" "$VF_CHAIN" 
+            "-c:v" "av1_qsv" 
+            "-preset" "7" 
+            "-global_quality:v" "$gq" 
+            "-extbrc" "1" 
+            "-b_strategy" "1" 
+            "-bf" "$bf" 
+            "-low_power" "0" 
+            "-pix_fmt" "p010le" 
+            "-fps_mode" "cfr"
+        )
     fi
 
-    # --- 4. AUDIO STRATEGY ---
+    # --- 4. Audio Strategy ---
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then
         write_log INFO "Audio is $A_CODEC. Passthrough."
@@ -163,43 +170,30 @@ function transcode {
             8) A_BIT="384000"; MAPPING="-mapping_family 1" ;; 
             *) A_BIT="128000"; MAPPING="" ;; 
         esac
-        write_log INFO "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus."
+        write_log INFO "Audio is $A_CODEC. Transcoding to Opus."
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-   # --- 5. EXECUTION ---
+    # --- 5. Execution (Hardened for Spaces and Logging) ---
     write_log INFO "Executing FFmpeg command..."
-    
-    # 5a. Ensure the temp file path is correctly quoted and located in the output directory
-    TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
-
-    # 5b. Construct the base hardware acceleration command
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
     [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
-    # 5c. Execute without 'eval' to preserve path spaces and handle DEBUG redirection
-    if [[ $DEBUG -eq 1 ]]; then 
-        "${FFMPEG_CMD[@]}" -i "$INPUT" \
-            -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
-            -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
-            -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
-    else 
-        "${FFMPEG_CMD[@]}" -i "$INPUT" \
-            -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
-            -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
-            -f matroska "$TEMP_IN_DIR" > /dev/null 2>&1
-    fi
+    # Execute direct to handle spaces; always log to file to catch hardware exit codes
+    "${FFMPEG_CMD[@]}" -i "$INPUT" \
+        -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
+        -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
+        -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
-    # Capture the exit code immediately after execution
     FFMPEG_EXIT_CODE=$?
     
     if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed (Code: $FFMPEG_EXIT_CODE). Likely hardware buffer or path issue. Check ${CURRENT_LOG}"
+        write_log ERROR "FFmpeg crashed (Code: $FFMPEG_EXIT_CODE). Check ${CURRENT_LOG}"
         rm -f "$TEMP_IN_DIR"
         return
     fi
 
-    # --- 6. SAFETY CHECKS ---
+    # --- 6. Safety Checks ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
         NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
         NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
@@ -210,7 +204,7 @@ function transcode {
             IS_DURATION_VALID=$(echo "$DURATION_DIFF < 3.0" | bc -l)
         else
             FRAME_DIFF=$((ORIG_FRAMES - NEW_FRAMES)); FRAME_DIFF=${FRAME_DIFF#-}; 
-            if [ "$FRAME_DIFF" -lt 15 ]; then IS_DURATION_VALID=1; else IS_DURATION_VALID=0; fi
+            [[ "$FRAME_DIFF" -lt 15 ]] && IS_DURATION_VALID=1 || IS_DURATION_VALID=0
         fi
 
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
@@ -225,7 +219,8 @@ function transcode {
             ((TOTAL_FILES_PROCESSED++))
             mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
         else
-            write_log WARN "Checks failed (Duration/Size). Keeping original."; rm -f "$TEMP_IN_DIR"
+            write_log WARN "Checks failed. Keeping original."
+            rm -f "$TEMP_IN_DIR"
             mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
         fi
     fi
