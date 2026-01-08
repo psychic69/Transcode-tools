@@ -67,6 +67,7 @@ function check_helper_bin {
 }
 
 # ************************************************
+
 function transcode {
     local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
     
@@ -153,6 +154,7 @@ function transcode {
         fi
     fi
 }
+
 # Recursive Process
 process_directory() {
     local input_path="$1"; local output_path="$2"
