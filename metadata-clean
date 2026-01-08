@@ -16,7 +16,7 @@ START_TIME=$(date +%s)
 
 function show_usage {
     echo "================================================================"
-    echo "  Smart Metadata Cleanup Tool for AV1/AAC/Opus Libraries"
+    echo "  Smart Metadata Cleanup Tool (AV1 / HEVC / AAC / Opus)"
     echo "================================================================"
     echo "Usage: $0 [options] <directory>"
     echo ""
@@ -25,7 +25,7 @@ function show_usage {
     echo "  -d, --dry-run    List files that would be cleaned without acting."
     echo "  -h, --help       Show this help menu."
     echo ""
-    echo "Note: This script preserves Chapters and handles AAC/Opus safely."
+    echo "Matches: Legacy tags in AV1/HEVC/AAC/Opus files."
     echo "Example:"
     echo "  $0 -d /media/tv/Stargate      (Test run)"
     echo "  $0 /media/tv/Stargate         (Smart cleanup)"
@@ -43,14 +43,13 @@ function needs_cleanup {
     if [[ $FORCE -eq 1 ]]; then return 0; fi
 
     # Peek at all stream titles
-    # We use ffprobe to extract titles from Video and Audio streams
     local titles=$( $FFPROBE -v error -show_entries stream_tags=title -of default=noprint_wrappers=1:nokey=1 "$input" | tr '[:upper:]' '[:lower:]' )
 
     if [[ -z "$titles" ]]; then return 1; fi
 
-    # Junk patterns to clean (legacy labels often found in remuxes)
-    # Added specific check for legacy audio labels that often persist in AAC passthrough
-    local junk_patterns="avc|h.264|h264|dolby|ac3|dts|vc-1|hevc|h.265|surround 5.1"
+    # Patterns that trigger a cleanup if found in titles:
+    # Includes h264, legacy audio, and cross-codec contamination (e.g., HEVC labeled as AV1)
+    local junk_patterns="avc|h.264|h264|dolby|ac3|dts|vc-1|hevc|h.265|av1|surround 5.1"
     
     if [[ "$titles" =~ $junk_patterns ]]; then
         return 0 # Found junk
@@ -67,15 +66,16 @@ function strip_metadata {
 
     if needs_cleanup "$input"; then
         if [[ $DRY_RUN -eq 1 ]]; then
-            log "[DRY-RUN] Would clean: $filename"
+            log "[DRY-RUN] Found junk in: $filename"
             ((FILES_CLEANED++))
             return
         fi
 
         log "Junk detected! Cleaning: $filename"
         
-        # -map_metadata -1 wipes global tags
-        # -map_metadata:s:v -1 and -map_metadata:s:a -1 wipes stream-specific labels
+        # -map_metadata -1: Strips global tags
+        # -map_metadata:s:v -1: Strips video titles (e.g. "MPEG-4 AVC")
+        # -map_metadata:s:a -1: Strips audio titles (e.g. "Dolby Digital")
         $FFMPEG -hide_banner -loglevel error -y \
             -i "$input" \
             -map 0 -c copy \
@@ -132,7 +132,7 @@ fi
 log "Starting scan of $TARGET_DIR..."
 process_dir "$TARGET_DIR"
 
-# --- Final Summary with Timer ---
+# --- Final Summary ---
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 
@@ -140,7 +140,7 @@ echo ""
 echo "================================================================"
 echo "                   FINAL SUMMARY"
 echo "================================================================"
-echo "Files Processed: $FILES_CLEANED"
+echo "Files Cleaned:   $FILES_CLEANED"
 echo "Time Elapsed:    $((ELAPSED / 60))m $((ELAPSED % 60))s"
 if [[ $DRY_RUN -eq 1 ]]; then
     echo "Mode:            DRY-RUN (No files modified)"
