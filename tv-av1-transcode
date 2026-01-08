@@ -116,14 +116,25 @@ function transcode {
         VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
         VIDEO_OPTS=("-vf" "$VF_CHAIN" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-look_ahead_depth" "$look_depth" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0" "-pix_fmt" "p010le" "-fps_mode" "cfr")
     fi
-
-    if [[ "$A_CODEC" == "aac" ]]; then 
+# --- Audio Strategy (Robust AAC Detection) --- Noted boundary case from AAC_2
+    # Convert to lowercase and check if it contains "aac"
+    A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
+    
+    if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then
+        write_log INFO "Audio is $A_CODEC. Matches AAC passthrough logic."
         AUDIO_OPTS=("-c:a" "copy")
     else
-        case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
-        AUDIO_OPTS=("-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" "-mapping_family" "1")
+        case $A_CHANNELS in 
+            2) A_BIT="128000"; MAPPING="" ;; 
+            6) A_BIT="256000"; MAPPING="-mapping_family 1" ;; 
+            8) A_BIT="384000"; MAPPING="-mapping_family 1" ;; 
+            *) A_BIT="128000"; MAPPING="" ;; 
+        esac
+        write_log INFO "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus."
+        # Use aresample filter to stabilize 5.1 input before Opus encoding
+        AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
-
+    
     # --- 3. Execution ---
     write_log INFO "Executing FFmpeg command..."
     # loglevel error added here to silence the mapping info
