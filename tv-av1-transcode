@@ -80,82 +80,77 @@ function transcode {
     TEMP_IN_DIR="$IN_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$IN_DIR/.${BASENAME%.*}.av1.tmp"*
 
-    # --- 1. Robust Metadata Detection ---
-    # Fetching everything in one go, but more broadly to avoid empty returns
+    # --- 1. Metadata Detection ---
     METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
 
-    # Use JQ with 'select' and 'first' to safely grab data even if multiple streams exist
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     PIX_FMT=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .pix_fmt' | head -n1)
     ORIG_FRAMES=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .nb_frames' | head -n1)
-    
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     S_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="subtitle")][0] | .codec_name' | head -n1)
     ORIG_DURATION=$(echo "$METADATA" | $JQ -r '.format.duration' | head -n1)
 
-    # Clean up empty/null variables to prevent FFmpeg crashes
     [[ "$S_CODEC" == "null" ]] && S_CODEC=""
     [[ "$ORIG_FRAMES" == "null" ]] && ORIG_FRAMES=0
 
     write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
 
-    # --- 2. Subtitle Strategy ---
-    if [[ -z "$S_CODEC" ]]; then
-        SUBTITLE_OPTS="-map 0:s?"
-    elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then
-        SUBTITLE_OPTS="-map 0:s? -c:s copy"
-    else
-        SUBTITLE_OPTS="-map 0:s? -c:s ass"
-    fi
+    # --- 2. Strategies ---
+    if [[ -z "$S_CODEC" ]]; then SUBTITLE_OPTS="-map 0:s?"; elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then SUBTITLE_OPTS="-map 0:s? -c:s copy"; else SUBTITLE_OPTS="-map 0:s? -c:s ass"; fi
 
-    # 3.  Video Strategy - Fixed Filter Syntax
-    if [[ "$V_CODEC" == "av1" ]]; then
-        VIDEO_OPTS="-c:v copy"
-    else
-        # Removed deinterlace=0 which caused the parsing error
-        # 'fps' filter is placed after vpp_qsv to ensure hardware frames are sized before rate is set
+    if [[ "$V_CODEC" == "av1" ]]; then VIDEO_OPTS="-c:v copy"; else
         VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
-        
-        # Added -extra_hw_frames to help with look_ahead stability
-        VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -extra_hw_frames 64"
+        VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr"
     fi
 
-    # --- 4. Audio Strategy ---
-    if [[ "$A_CODEC" == "aac" ]]; then
-        AUDIO_OPTS="-c:a copy"
-    else
+    if [[ "$A_CODEC" == "aac" ]]; then AUDIO_OPTS="-c:a copy"; else
         case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
         AUDIO_OPTS="-c:a libopus -b:a $A_BIT -vbr on -mapping_family 1"
     fi
 
-   # --- 5. Execution ---
+    # --- 3. Execution ---
     write_log INFO "Executing FFmpeg command..."
-    FFMPEG_EXIT_CODE=0
-
-    # Build the base command array
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-y")
-    
-    # Add HW acceleration flags if not already AV1
-    if [[ "$V_CODEC" != "av1" ]]; then
-        FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
+    [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
+    FFMPEG_CMD+=("-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?" $SUBTITLE_OPTS "-map_metadata" "0" $VIDEO_OPTS $AUDIO_OPTS "-f" "matroska" "$TEMP_IN_DIR")
+
+    if [[ $DEBUG -eq 1 ]]; then "${FFMPEG_CMD[@]}" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+    else "${FFMPEG_CMD[@]}" > /dev/null 2>&1; fi
+    FFMPEG_EXIT_CODE=$?
+
+    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
+        write_log ERROR "FFmpeg crashed. Code: $FFMPEG_EXIT_CODE"; rm -f "$TEMP_IN_DIR"; return
     fi
 
-    # Add shared parameters
-    FFMPEG_CMD+=("-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?")
-    FFMPEG_CMD+=($SUBTITLE_OPTS "-map_metadata" "0")
-    FFMPEG_CMD+=($VIDEO_OPTS $AUDIO_OPTS "-f" "matroska" "$TEMP_IN_DIR")
+    # --- 4. Safety Checks & Savings Logic (RESTORED) ---
+    if [[ -f "$TEMP_IN_DIR" ]]; then
+        NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
+        NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
+        
+        if [[ "$NEW_FRAMES" == "null" || -z "$NEW_FRAMES" ]]; then
+            NEW_DURATION=$(echo "$NEW_METADATA" | $JQ -r '.format.duration')
+            DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
+            IS_DURATION_VALID=$(echo "$DURATION_DIFF < 3.0" | bc -l)
+        else
+            FRAME_DIFF=$((ORIG_FRAMES - NEW_FRAMES)); FRAME_DIFF=${FRAME_DIFF#-}; 
+            if [ "$FRAME_DIFF" -lt 15 ]; then IS_DURATION_VALID=1; else IS_DURATION_VALID=0; fi
+        fi
 
-    # Final Execution with conditional redirection
-    if [[ $DEBUG -eq 1 ]]; then
-        # Log to file if Debug is ON
-        "${FFMPEG_CMD[@]}" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
-        FFMPEG_EXIT_CODE=$?
-    else
-        # Throw away output to /dev/null if Debug is OFF
-        "${FFMPEG_CMD[@]}" > /dev/null 2>&1
-        FFMPEG_EXIT_CODE=$?
+        OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
+        THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
+        IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
+        SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
+        OLD_MB=$((OLD_SIZE / 1048576)); NEW_MB=$((NEW_SIZE / 1048576))
+
+        if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 ]]; then
+            write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_MB}MB -> ${NEW_MB}MB). Replacing original."
+            mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+        else
+            write_log WARN "Checks failed (Size: $IS_SIZE_VALID, Dur: $IS_DURATION_VALID). Savings: ${SAVINGS}%. Keeping original."
+            rm -f "$TEMP_IN_DIR"; mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
+        fi
     fi
 }
 # Recursive Process
