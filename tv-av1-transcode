@@ -130,30 +130,23 @@ function transcode {
         AUDIO_OPTS="-c:a libopus -b:a $A_BIT -vbr on -mapping_family 1"
     fi
 
-    # --- 5. Execution ---
+   # --- 5. Execution ---
     write_log INFO "Executing FFmpeg command..."
+    FFMPEG_EXIT_CODE=0
     
-    # Run FFmpeg without eval for better stability with quotes/paths
+    # We remove the $FFMPEG_REDIRECT variable and use standard shell redirection
     if [[ "$V_CODEC" == "av1" ]]; then
         $FFMPEG -hide_banner -y -i "$INPUT" \
             -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 \
-            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" $FFMPEG_REDIRECT
+            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+        FFMPEG_EXIT_CODE=$?
     else
         $FFMPEG -hide_banner -y -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
             -i "$INPUT" \
             -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 \
-            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" $FFMPEG_REDIRECT
+            $VIDEO_OPTS $AUDIO_OPTS -f matroska "$TEMP_IN_DIR" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+        FFMPEG_EXIT_CODE=$?
     fi
-
-    FFMPEG_EXIT_CODE=$?
-
-    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed for $BASENAME. Code: $FFMPEG_EXIT_CODE"
-        rm -f "$TEMP_IN_DIR"
-        return
-    fi
-    
-    # ... (Keep existing Safety Checks)
 }
 # Recursive Process
 process_directory() {
