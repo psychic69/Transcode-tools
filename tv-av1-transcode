@@ -110,13 +110,16 @@ function transcode {
         SUBTITLE_OPTS="-map 0:s? -c:s ass"
     fi
 
-    # --- 3. Video Strategy ---
+    # 3.  Video Strategy - Fixed Filter Syntax
     if [[ "$V_CODEC" == "av1" ]]; then
         VIDEO_OPTS="-c:v copy"
     else
-        # Force deinterlace=0 and set the FPS to match source
-        VF_CHAIN="vpp_qsv,fps=fps=$SRC_FPS,format=p010,deinterlace=0"
-        VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr"
+        # Removed deinterlace=0 which caused the parsing error
+        # 'fps' filter is placed after vpp_qsv to ensure hardware frames are sized before rate is set
+        VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
+        
+        # Added -extra_hw_frames to help with look_ahead stability
+        VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -extra_hw_frames 64"
     fi
 
     # --- 4. Audio Strategy ---
