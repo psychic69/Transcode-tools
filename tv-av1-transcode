@@ -167,21 +167,36 @@ function transcode {
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 5. EXECUTION ---
+   # --- 5. EXECUTION ---
     write_log INFO "Executing FFmpeg command..."
+    
+    # 5a. Ensure the temp file path is correctly quoted and located in the output directory
+    TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
+
+    # 5b. Construct the base hardware acceleration command
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
     [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
-    FULL_CMD=("${FFMPEG_CMD[@]}" "-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?" "${SUBTITLE_OPTS[@]}" "-map_metadata" "0" "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" "-f" "matroska" "$TEMP_IN_DIR")
-
+    # 5c. Execute without 'eval' to preserve path spaces and handle DEBUG redirection
     if [[ $DEBUG -eq 1 ]]; then 
-        "${FULL_CMD[@]}" >> "${CURRENT_LOG}" 2>&1
+        "${FFMPEG_CMD[@]}" -i "$INPUT" \
+            -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
+            -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
+            -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     else 
-        eval "${FULL_CMD[@]} ${FFMPEG_REDIRECT}"
+        "${FFMPEG_CMD[@]}" -i "$INPUT" \
+            -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
+            -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
+            -f matroska "$TEMP_IN_DIR" > /dev/null 2>&1
     fi
     
-    if [ $? -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed. Subtitle or Buffer issue. Check ${CURRENT_LOG}"; rm -f "$TEMP_IN_DIR"; return
+    # Capture the exit code immediately after execution
+    FFMPEG_EXIT_CODE=$?
+    
+    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
+        write_log ERROR "FFmpeg crashed (Code: $FFMPEG_EXIT_CODE). Likely hardware buffer or path issue. Check ${CURRENT_LOG}"
+        rm -f "$TEMP_IN_DIR"
+        return
     fi
 
     # --- 6. SAFETY CHECKS ---
