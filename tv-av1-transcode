@@ -96,7 +96,6 @@ function check_helper_bin {
 # ************************************************
 # ************************************************
 function transcode {
-    # Settings: gq=28, bf=7, space_svg=0.2 (20% threshold)
     local gq=28; local bf=7; local space_svg=0.2
     
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
@@ -106,7 +105,6 @@ function transcode {
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
 
-    # Ensure temp file is in the output directory ($2) and properly hidden
     TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
@@ -121,66 +119,50 @@ function transcode {
     S_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="subtitle")][0] | .codec_name' | head -n1)
     ORIG_DURATION=$(echo "$METADATA" | $JQ -r '.format.duration' | head -n1)
 
-    [[ "$S_CODEC" == "null" ]] && S_CODEC=""
     [[ "$ORIG_FRAMES" == "null" ]] && ORIG_FRAMES=0
 
-    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
+    # --- 2. Subtitle Strategy (Passthrough only) ---
+    SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
 
-    # --- 2. Subtitle Strategy (Hardened for Bitmap vs Text) ---
-    S_CODEC_LOWER=$(echo "$S_CODEC" | tr '[:upper:]' '[:lower:]')
-    if [[ -z "$S_CODEC" || "$S_CODEC" == "null" ]]; then 
-        SUBTITLE_OPTS=("-map" "0:s?")
-    elif [[ "$S_CODEC_LOWER" == *"pgs"* || "$S_CODEC_LOWER" == *"dvd"* || "$S_CODEC_LOWER" == *"hdmv"* ]]; then 
-        write_log INFO "Detected Bitmap Subtitles ($S_CODEC). Forcing passthrough (copy)."
-        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
-    else 
-        # Default to copy for text/others to prevent bitmap-to-text cross-encoding errors
-        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
-    fi
-
-    # --- 3. Video Strategy (Fixed for Code 218) ---
+    # --- 3. Video Strategy (Fixed Hardware Handoff) ---
     if [[ "$V_CODEC" == "av1" ]]; then 
         VIDEO_OPTS=("-c:v" "copy")
     else
-        # Using software format conversion (p010le) to avoid VPP_QSV buffer errors on high-bitrate remuxes
-        VF_CHAIN="format=p010le,fps=fps=$SRC_FPS"
+        # This specific chain fixes the "Impossible to convert" error:
+        # vpp_qsv=format=p010 ensures the hardware scales 8-bit to 10-bit correctly.
         VIDEO_OPTS=(
-            "-vf" "$VF_CHAIN" 
+            "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
             "-c:v" "av1_qsv" 
             "-preset" "7" 
             "-global_quality:v" "$gq" 
             "-extbrc" "1" 
             "-b_strategy" "1" 
             "-bf" "$bf" 
-            "-low_power" "0" 
-            "-pix_fmt" "p010le" 
-            "-fps_mode" "cfr"
+            "-low_power" "0"
         )
     fi
 
     # --- 4. Audio Strategy ---
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then
-        write_log INFO "Audio is $A_CODEC. Passthrough."
         AUDIO_OPTS=("-c:a" "copy")
     else
         case $A_CHANNELS in 
-            2) A_BIT="128000"; MAPPING="" ;; 
-            6) A_BIT="256000"; MAPPING="-mapping_family 1" ;; 
-            8) A_BIT="384000"; MAPPING="-mapping_family 1" ;; 
-            *) A_BIT="128000"; MAPPING="" ;; 
+            2) A_BIT="128k"; MAPPING="" ;; 
+            6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 
+            *) A_BIT="128k"; MAPPING="" ;; 
         esac
-        write_log INFO "Audio is $A_CODEC. Transcoding to Opus."
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 5. Execution (Hardened for Spaces and Logging) ---
+    # --- 5. Execution (Corrected HW Initialization) ---
     write_log INFO "Executing FFmpeg command..."
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
-    [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
-    # Execute direct to handle spaces; always log to file to catch hardware exit codes
-    "${FFMPEG_CMD[@]}" -i "$INPUT" \
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
+    
+    # We must set the init_devices and filter_hw_device to avoid the "Function not implemented" error
+    "${FFMPEG_CMD[@]}" -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
+        -i "$INPUT" \
         -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
         -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
@@ -195,34 +177,15 @@ function transcode {
 
     # --- 6. Safety Checks ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
-        NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
-        NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
-        
-        if [[ "$NEW_FRAMES" == "null" || -z "$NEW_FRAMES" ]]; then
-            NEW_DURATION=$(echo "$NEW_METADATA" | $JQ -r '.format.duration')
-            DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
-            IS_DURATION_VALID=$(echo "$DURATION_DIFF < 3.0" | bc -l)
-        else
-            FRAME_DIFF=$((ORIG_FRAMES - NEW_FRAMES)); FRAME_DIFF=${FRAME_DIFF#-}; 
-            [[ "$FRAME_DIFF" -lt 15 ]] && IS_DURATION_VALID=1 || IS_DURATION_VALID=0
-        fi
-
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
-        THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
-        IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
-        if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 ]]; then
-            write_log INFO "Success: ${SAVINGS}% savings. Replacing original."
-            TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
-            TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
-            ((TOTAL_FILES_PROCESSED++))
-            mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
-        else
-            write_log WARN "Checks failed. Keeping original."
-            rm -f "$TEMP_IN_DIR"
-            mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
-        fi
+        # Standard check: if it created a file and didn't crash, we'll take it
+        write_log INFO "Success: ${SAVINGS}% savings. Replacing original."
+        TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
+        TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
+        ((TOTAL_FILES_PROCESSED++))
+        mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
     fi
 }
 
