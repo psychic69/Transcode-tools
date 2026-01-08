@@ -8,10 +8,11 @@ MEDIAINFO="/usr/bin/mediainfo"
 DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
+
 # Suppress libva info messages (errors only)
 export LIBVA_MESSAGING_LEVEL=1
 
-# --- Global Log Definition (Your Recommendation) ---
+# --- Global Log Definition ---
 SHORT_DATE=$(date "+%m-%d-%y")
 CURRENT_LOG="$LOG_DIR/logfile-${SHORT_DATE}-PID${$}"
 
@@ -56,13 +57,6 @@ for arg in "$@"; do
 done
 TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
 
-# Redirect logic referencing the Global Log variable
-if [[ $DEBUG -eq 0 ]]; then 
-    FFMPEG_REDIRECT="> /dev/null 2>&1"
-else 
-    FFMPEG_REDIRECT=">> ${CURRENT_LOG} 2>&1"
-fi
-
 # Load parameter.ini
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARAM_FILE="$SCRIPT_DIR/parameter.ini"
@@ -105,6 +99,7 @@ function transcode {
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
 
+    # Ensure temp is in the output dir to avoid cross-device moves
     TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
@@ -120,6 +115,9 @@ function transcode {
     ORIG_DURATION=$(echo "$METADATA" | $JQ -r '.format.duration' | head -n1)
 
     [[ "$ORIG_FRAMES" == "null" ]] && ORIG_FRAMES=0
+    
+    # --- LOG RESTORED: Metadata Info ---
+    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
 
     # --- 2. Subtitle Strategy ---
     SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
@@ -155,6 +153,7 @@ function transcode {
     
     # --- 5. Execution ---
     write_log INFO "Executing FFmpeg command..."
+    # Global Hardware Context Setup
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
     "${FFMPEG_CMD[@]}" -i "$INPUT" \
@@ -168,7 +167,6 @@ function transcode {
 
     # --- 6. Safety Checks & Success Finalization ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
-        # Restored Size Calculations
         OLD_SIZE=$(stat -c%s "$INPUT")
         NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
         local old_mb=$((OLD_SIZE / 1048576))
@@ -179,20 +177,20 @@ function transcode {
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
         if [[ "$IS_SIZE_VALID" -eq 1 ]]; then
+            # LOG RESTORED: Size calculations
             write_log INFO "Success: ${SAVINGS}% savings (${old_mb}MB -> ${new_mb}MB). Replacing original."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
             ((TOTAL_FILES_PROCESSED++))
             mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
         else
-            write_log WARN "Checks failed (Savings: ${SAVINGS}%). Below ${space_svg}% threshold. Keeping original."
+            write_log WARN "Checks failed (Savings: ${SAVINGS}%). Below 20% threshold. Keeping original."
             rm -f "$TEMP_IN_DIR"
-            # Move to dest but keep original extension if not optimizing
             mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
         fi
     fi
 }
-####################################################
+
 process_directory() {
     local input_path="$1"; local output_path="$2"
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
