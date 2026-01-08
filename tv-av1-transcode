@@ -80,15 +80,22 @@ function transcode {
     TEMP_IN_DIR="$IN_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$IN_DIR/.${BASENAME%.*}.av1.tmp"*
 
-    V_CODEC=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT")
-    A_CODEC=$($FFPROBE -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
-    A_CHANNELS=$($FFPROBE -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
-    S_CODEC=$($FFPROBE -v error -select_streams s:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" | head -n1)
-    ORIG_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
-    ORIG_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$INPUT")
+    # --- Consolidated Metadata Detection (One call) ---
+    METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name,nb_frames,r_frame_rate,pix_fmt -show_entries format=duration -select_streams s:0 -show_entries stream=codec_name -select_streams a:0 -show_entries stream=codec_name,channels -of json "$INPUT")
+
+    V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name')
+    SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate')
+    PIX_FMT=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .pix_fmt')
+    ORIG_FRAMES=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .nb_frames')
+    
+    A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name')
+    A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels')
+    
+    S_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="subtitle")][0] | .codec_name')
+    ORIG_DURATION=$(echo "$METADATA" | $JQ -r '.format.duration')
 
     # Subtitle Strategy
-    if [[ -z "$S_CODEC" ]]; then
+    if [[ -z "$S_CODEC" || "$S_CODEC" == "null" ]]; then
         SUBTITLE_OPTS="-map 0:s?"
     elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then
         SUBTITLE_OPTS="-map 0:s? -c:s copy"
@@ -101,33 +108,28 @@ function transcode {
         write_log INFO "Video is already AV1. Passthrough."
         VIDEO_OPTS="-c:v copy"
     else
-        # Detect source FPS to prevent the 50fps jump
-        SRC_FPS=$($FFPROBE -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$INPUT")
-        write_log INFO "Video is $V_CODEC at $SRC_FPS FPS. Encoding AV1 QSV 10-bit."
-        
-        # Use vpp_qsv for the FPS and Format filters
+        write_log INFO "Video is $V_CODEC at $SRC_FPS FPS ($PIX_FMT). Encoding AV1 QSV 10-bit."
         VF_CHAIN="vpp_qsv,fps=fps=$SRC_FPS,format=p010"
         VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr -max_interleave_delta 0 -reserve_index_space 100k"
     fi
 
-    # Audio Strategy - Restored Original logic
+    # Audio Strategy - Restored original logic (AAC passthrough)
     if [[ "$A_CODEC" == "aac" ]]; then
         write_log INFO "Audio is AAC. Passthrough."
         AUDIO_OPTS="-c:a copy"
     else
         case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
-        write_log INFO "Audio is $A_CODEC. Transcoding to Opus."
-        # Added -vbr on to satisfy libopus requirements
+        write_log INFO "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus."
         AUDIO_OPTS="-c:a libopus -b:a $A_BIT -vbr on -mapping_family 1"
     fi
 
-    # Execution - Added -auto_deinterlace 0
+    # Execution
     write_log INFO "Executing FFmpeg command..."
     FFMPEG_EXIT_CODE=0
     if [[ "$V_CODEC" == "av1" ]]; then
         eval "$FFMPEG -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$TEMP_IN_DIR\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     else
-        # -auto_deinterlace 0 prevents the hardware from doubling frames to 50fps
+        # -auto_deinterlace 0 prevents hardware from doubling frames
         eval "$FFMPEG -hwaccel qsv -qsv_device \"$DEVICE\" -hwaccel_output_format qsv -auto_deinterlace 0 -i \"$INPUT\" -map 0:v:0 -map 0:a? $SUBTITLE_OPTS -map_metadata 0 $VIDEO_OPTS $AUDIO_OPTS -f matroska \"$TEMP_IN_DIR\" $FFMPEG_REDIRECT" || FFMPEG_EXIT_CODE=$?
     fi
 
@@ -139,10 +141,11 @@ function transcode {
 
     # Safety Checks
     if [[ -f "$TEMP_IN_DIR" ]]; then
-        NEW_FRAMES=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
+        NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
+        NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
         
-        if [[ "$NEW_FRAMES" == "N/A" || -z "$NEW_FRAMES" ]]; then
-            NEW_DURATION=$($FFPROBE -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
+        if [[ "$NEW_FRAMES" == "null" || -z "$NEW_FRAMES" ]]; then
+            NEW_DURATION=$(echo "$NEW_METADATA" | $JQ -r '.format.duration')
             DURATION_DIFF=$(echo "$NEW_DURATION - $ORIG_DURATION" | bc -l | tr -d '-')
             IS_DURATION_VALID=$(echo "$DURATION_DIFF < 3.0" | bc -l)
         else
@@ -172,6 +175,7 @@ function transcode {
     fi
 }
 
+# Recursive Process
 process_directory() {
     local input_path="$1"; local output_path="$2"
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
