@@ -238,17 +238,34 @@ process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
     if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete; fi
 
-    if [[ $SONARR -eq 1 ]]; then
+if [[ $SONARR -eq 1 ]]; then
         TARGET_IP=${SONARR_IP:-$PLEX_IP}
-        write_log INFO "Notifying Sonarr at $TARGET_IP..."
-        curl -s "http://${TARGET_IP}:8989/api/v3/command" -X POST -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$TV_OUTPUT_DIR\"}" -H "X-Api-Key: $SONARR_API_KEY" -H "Content-Type: application/json" > /dev/null
-    fi
+        
+        # Build the path Sonarr sees internally
+        # Removes the local TV_INPUT_DIR prefix and attaches the SONARR_BASE_PATH
+        SUBFOLDER=${TV_OUTPUT_DIR#$TV_INPUT_DIR}
+        SONARR_FINAL_PATH="${SONARR_BASE_PATH}${SUBFOLDER}"
 
-    if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then 
-        write_log INFO "Running Plex-update..."
-        "$SCRIPT_DIR/Plex-update"
+        write_log INFO "Notifying Sonarr at $TARGET_IP"
+        write_log INFO "Target Container Path: $SONARR_FINAL_PATH"
+        
+        # Execute and capture response to log
+        # We use -w to get the HTTP status code and append the JSON body to the log
+        RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            -H "X-Api-Key: $SONARR_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$SONARR_FINAL_PATH\"}" \
+            "http://${TARGET_IP}:8989/api/v3/command")
+
+        # Log the raw response for debugging
+        echo "[SONARR RESPONSE] $RESPONSE" >> "${CURRENT_LOG}"
+
+        if [[ "$RESPONSE" == *"HTTP_STATUS:201"* ]]; then
+            write_log INFO "Sonarr scan triggered successfully."
+        else
+            write_log WARN "Sonarr API returned an error. Check log for details."
+        fi
     fi
-fi
 
 # --- FINAL SUMMARY ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
