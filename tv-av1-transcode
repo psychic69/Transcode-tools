@@ -94,8 +94,10 @@ function check_helper_bin {
 }
 
 # ************************************************
+# ************************************************
 function transcode {
-    local gq=28; local look_depth=60; local bf=7; local space_svg=0.2
+    # Reduced look_depth from 60 to 40 for stability on very long/large files
+    local gq=28; local look_depth=40; local bf=7; local space_svg=0.2
     
     INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
     IN_DIR=$(dirname "$INPUT")
@@ -124,23 +126,32 @@ function transcode {
 
     write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
 
-    # --- 2. Strategies ---
-    if [[ -z "$S_CODEC" ]]; then 
+    # --- 2. HARDENED SUBTITLE STRATEGY (Fixes Bitmap vs Text crash) ---
+    S_CODEC_LOWER=$(echo "$S_CODEC" | tr '[:upper:]' '[:lower:]')
+
+    if [[ -z "$S_CODEC" || "$S_CODEC" == "null" ]]; then 
         SUBTITLE_OPTS=("-map" "0:s?")
-    elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then 
+    elif [[ "$S_CODEC_LOWER" == *"pgs"* || "$S_CODEC_LOWER" == *"dvd"* || "$S_CODEC_LOWER" == *"hdmv"* ]]; then 
+        write_log INFO "Detected Bitmap Subtitles ($S_CODEC). Forcing passthrough (copy)."
+        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
+    elif [[ "$S_CODEC_LOWER" =~ ^(subrip|ass|ssa|mov_text|text)$ ]]; then 
+        write_log INFO "Detected Text Subtitles ($S_CODEC). Forcing passthrough (copy)."
         SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
     else 
-        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "ass")
+        write_log INFO "Unknown Subtitle Type ($S_CODEC). Attempting generic copy."
+        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
     fi
 
+    # --- 3. VIDEO STRATEGY ---
     if [[ "$V_CODEC" == "av1" ]]; then 
         VIDEO_OPTS=("-c:v" "copy")
     else
-        VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
+        # Force software format conversion (nv12) before QSV to help with high-bitrate AVC sources
+        VF_CHAIN="format=nv12,vpp_qsv,format=p010,fps=fps=$SRC_FPS"
         VIDEO_OPTS=("-vf" "$VF_CHAIN" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-look_ahead_depth" "$look_depth" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0" "-pix_fmt" "p010le" "-fps_mode" "cfr")
     fi
 
-    # Audio Strategy
+    # --- 4. AUDIO STRATEGY ---
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then
         write_log INFO "Audio is $A_CODEC. Passthrough."
@@ -152,11 +163,11 @@ function transcode {
             8) A_BIT="384000"; MAPPING="-mapping_family 1" ;; 
             *) A_BIT="128000"; MAPPING="" ;; 
         esac
-        write_log INFO "Audio is $A_CODEC. Transcoding to Opus."
+        write_log INFO "Audio is $A_CODEC ($A_CHANNELS ch). Transcoding to Opus."
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 3. Execution ---
+    # --- 5. EXECUTION ---
     write_log INFO "Executing FFmpeg command..."
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
     [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
@@ -166,14 +177,14 @@ function transcode {
     if [[ $DEBUG -eq 1 ]]; then 
         "${FULL_CMD[@]}" >> "${CURRENT_LOG}" 2>&1
     else 
-        "${FULL_CMD[@]}" > /dev/null 2>&1
+        eval "${FULL_CMD[@]} ${FFMPEG_REDIRECT}"
     fi
     
     if [ $? -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed. Check ${CURRENT_LOG}"; rm -f "$TEMP_IN_DIR"; return
+        write_log ERROR "FFmpeg crashed. Subtitle or Buffer issue. Check ${CURRENT_LOG}"; rm -f "$TEMP_IN_DIR"; return
     fi
 
-    # --- 4. Safety Checks ---
+    # --- 6. SAFETY CHECKS ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
         NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
         NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
@@ -199,12 +210,13 @@ function transcode {
             ((TOTAL_FILES_PROCESSED++))
             mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
         else
-            write_log WARN "Checks failed. Keeping original."; rm -f "$TEMP_IN_DIR"
+            write_log WARN "Checks failed (Duration/Size). Keeping original."; rm -f "$TEMP_IN_DIR"
             mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
         fi
     fi
 }
 
+####################################################
 process_directory() {
     local input_path="$1"; local output_path="$2"
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
