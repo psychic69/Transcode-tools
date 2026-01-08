@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# --- Configuration ---
+ALLOWED_EXT="mp4,mkv"
+FFMPEG="/usr/lib/jellyfin-ffmpeg/ffmpeg"
+FFPROBE="/usr/lib/jellyfin-ffmpeg/ffprobe"
+export LIBVA_MESSAGING_LEVEL=1
+
+# --- Global Flags & Counters ---
+FORCE=0
+DRY_RUN=0
+FILES_CLEANED=0
+START_TIME=$(date +%s)
+
+# --- Functions ---
+
+function show_usage {
+    echo "================================================================"
+    echo "  Smart Metadata Cleanup Tool for AV1/AAC/Opus Libraries"
+    echo "================================================================"
+    echo "Usage: $0 [options] <directory>"
+    echo ""
+    echo "Options:"
+    echo "  -f, --force      Skip 'peeking' and clean all files found."
+    echo "  -d, --dry-run    List files that would be cleaned without acting."
+    echo "  -h, --help       Show this help menu."
+    echo ""
+    echo "Note: This script preserves Chapters and handles AAC/Opus safely."
+    echo "Example:"
+    echo "  $0 -d /media/tv/Stargate      (Test run)"
+    echo "  $0 /media/tv/Stargate         (Smart cleanup)"
+    echo "================================================================"
+    exit 0
+}
+
+function log {
+    echo "[$(date +%H:%M:%S)] $1"
+}
+
+function needs_cleanup {
+    local input="$1"
+    
+    if [[ $FORCE -eq 1 ]]; then return 0; fi
+
+    # Peek at all stream titles
+    # We use ffprobe to extract titles from Video and Audio streams
+    local titles=$( $FFPROBE -v error -show_entries stream_tags=title -of default=noprint_wrappers=1:nokey=1 "$input" | tr '[:upper:]' '[:lower:]' )
+
+    if [[ -z "$titles" ]]; then return 1; fi
+
+    # Junk patterns to clean (legacy labels often found in remuxes)
+    # Added specific check for legacy audio labels that often persist in AAC passthrough
+    local junk_patterns="avc|h.264|h264|dolby|ac3|dts|vc-1|hevc|h.265|surround 5.1"
+    
+    if [[ "$titles" =~ $junk_patterns ]]; then
+        return 0 # Found junk
+    fi
+
+    return 1 # Clean
+}
+
+function strip_metadata {
+    local input="$1"
+    local filename=$(basename "$input")
+    local dir=$(dirname "$input")
+    local temp_file="$dir/.clean_${filename}"
+
+    if needs_cleanup "$input"; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            log "[DRY-RUN] Would clean: $filename"
+            ((FILES_CLEANED++))
+            return
+        fi
+
+        log "Junk detected! Cleaning: $filename"
+        
+        # -map_metadata -1 wipes global tags
+        # -map_metadata:s:v -1 and -map_metadata:s:a -1 wipes stream-specific labels
+        $FFMPEG -hide_banner -loglevel error -y \
+            -i "$input" \
+            -map 0 -c copy \
+            -map_metadata -1 \
+            -map_metadata:s:v -1 \
+            -map_metadata:s:a -1 \
+            -map_metadata:s:s -1 \
+            "$temp_file"
+
+        if [ $? -eq 0 ] && [ -f "$temp_file" ]; then
+            mv "$temp_file" "$input"
+            log "Done: $filename is now clean."
+            ((FILES_CLEANED++))
+        else
+            log "ERROR: Failed to clean $filename"
+            rm -f "$temp_file"
+        fi
+    fi
+}
+
+function process_dir {
+    for item in "$1"/*; do
+        if [ -d "$item" ]; then
+            process_dir "$item"
+        elif [ -f "$item" ]; then
+            ext="${item##*.}"
+            if [[ ",$ALLOWED_EXT," =~ ",$ext," ]]; then
+                strip_metadata "$item"
+            fi
+        fi
+    done
+}
+
+# --- Main Logic ---
+
+if [[ $# -eq 0 ]]; then show_usage; fi
+
+TARGET_DIR=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) show_usage ;;
+        -f|--force) FORCE=1; shift ;;
+        -d|--dry-run) DRY_RUN=1; shift ;;
+        -*) echo "Unknown option: $1"; show_usage ;;
+        *) TARGET_DIR="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$TARGET_DIR" ]]; then
+    echo "ERROR: No target directory specified."
+    show_usage
+fi
+
+log "Starting scan of $TARGET_DIR..."
+process_dir "$TARGET_DIR"
+
+# --- Final Summary with Timer ---
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+
+echo ""
+echo "================================================================"
+echo "                   FINAL SUMMARY"
+echo "================================================================"
+echo "Files Processed: $FILES_CLEANED"
+echo "Time Elapsed:    $((ELAPSED / 60))m $((ELAPSED % 60))s"
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "Mode:            DRY-RUN (No files modified)"
+fi
+echo "================================================================"
