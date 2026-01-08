@@ -7,6 +7,9 @@ MEDIAINFO="/usr/bin/mediainfo"
 DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
+TOTAL_SAVED_BYTES=0
+TOTAL_FILES_PROCESSED=0
+TOTAL_ORIGINAL_SIZE=0
 
 # ************************************************
 # Function to clean up on exit/interrupt (Trap)
@@ -161,9 +164,18 @@ function transcode {
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
         OLD_MB=$((OLD_SIZE / 1048576)); NEW_MB=$((NEW_SIZE / 1048576))
 
-        if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 ]]; then
+    if [[ "$IS_DURATION_VALID" -eq 1 && "$IS_SIZE_VALID" -eq 1 ]]; then
             write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_MB}MB -> ${NEW_MB}MB). Replacing original."
+            
+            # --- Update Totals for Summary ---
+            SAVED_IN_FILE=$((OLD_SIZE - NEW_SIZE))
+            TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + SAVED_IN_FILE))
+            TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
+            ((TOTAL_FILES_PROCESSED++))
+            # ---------------------------------
+
             mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+
         else
             write_log WARN "Checks failed (Size: $IS_SIZE_VALID, Dur: $IS_DURATION_VALID). Savings: ${SAVINGS}%. Keeping original."
             rm -f "$TEMP_IN_DIR"; mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
@@ -199,3 +211,20 @@ if [[ $SONARR -eq 1 ]]; then
 fi
 
 if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then "$SCRIPT_DIR/Plex-update"; fi
+
+# --- FINAL SUMMARY ---
+if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
+    TOTAL_SAVED_MB=$((TOTAL_SAVED_BYTES / 1048576))
+    TOTAL_SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc -l)
+    TOTAL_ORIG_GB=$(echo "scale=2; $TOTAL_ORIGINAL_SIZE / 1073741824" | bc -l)
+    
+    write_log INFO "******************************************"
+    write_log INFO "   FINAL SESSION SUMMARY"
+    write_log INFO "******************************************"
+    write_log INFO "Files Re-encoded: $TOTAL_FILES_PROCESSED"
+    write_log INFO "Total Data Scanned: ${TOTAL_ORIG_GB} GB"
+    write_log INFO "Total Storage Reclaimed: ${TOTAL_SAVED_GB} GB (${TOTAL_SAVED_MB} MB)"
+    write_log INFO "******************************************"
+else
+    write_log INFO "No files were optimized during this run."
+fi
