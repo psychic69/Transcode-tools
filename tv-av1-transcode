@@ -232,37 +232,48 @@ process_directory() {
 check_helper_bin
 write_log INFO "Beginning Execution. Log: ${CURRENT_LOG}"
 
+# Clean up any leftover temp files from crashed runs
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+
+# Run the transcode/move process
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-# --- POST-TRANSCODE TASKS ---
+# --- POST-PROCESSING TASKS ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
-    # 1. Clean up empty directories
+    # 1. Clean up empty source directories
     if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then 
         find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
     fi
 
-    # 2. Sonarr Notification
+    # 2. Sonarr Notification (Manual Import)
     if [[ $SONARR -eq 1 ]]; then
         TARGET_IP=${SONARR_IP:-$PLEX_IP}
+        
+        # Build the path Sonarr sees internally (/downloads/converted + /Stargate/S01)
         SUBFOLDER=${TV_OUTPUT_DIR#$TV_INPUT_DIR}
         SONARR_FINAL_PATH="${SONARR_BASE_PATH}${SUBFOLDER}"
 
-        write_log INFO "Notifying Sonarr at $TARGET_IP"
-        write_log INFO "Target Container Path: $SONARR_FINAL_PATH"
+        write_log INFO "Notifying Sonarr to IMPORT from: $SONARR_FINAL_PATH"
         
+        # We use ManualImport because Sonarr didn't trigger this download
+        # This forces Sonarr to move files from /downloads/converted to Plex
         RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             -H "X-Api-Key: $SONARR_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$SONARR_FINAL_PATH\"}" \
+            -d "{
+                \"name\": \"ManualImport\",
+                \"path\": \"$SONARR_FINAL_PATH\",
+                \"importMode\": \"move\",
+                \"overwrite\": true
+            }" \
             "http://${TARGET_IP}:8989/api/v3/command")
 
         echo "[SONARR RESPONSE] $RESPONSE" >> "${CURRENT_LOG}"
 
         if [[ "$RESPONSE" == *"HTTP_STATUS:201"* ]]; then
-            write_log INFO "Sonarr scan triggered successfully."
+            write_log INFO "Sonarr has accepted the files for import into Plex."
         else
-            write_log WARN "Sonarr API returned an error."
+            write_log ERROR "Sonarr rejected the import. Check /downloads/converted visibility."
         fi
     fi
 
@@ -271,7 +282,7 @@ if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
         write_log INFO "Running Plex-update..."
         "$SCRIPT_DIR/Plex-update"
     fi
-fi  # <--- THIS WAS THE MISSING 'fi' THAT CAUSED THE EOF ERROR
+fi 
 
 # --- FINAL SUMMARY ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
