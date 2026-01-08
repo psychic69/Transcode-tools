@@ -151,18 +151,31 @@ function transcode {
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 5. Execution ---
+    # --- 5. EXECUTION (Clean Metadata, Keep Chapters) ---
     write_log INFO "Executing FFmpeg command..."
+    
     # Global Hardware Context Setup
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
+    # 1. -map_metadata -1       Strips global tags (IMDB, Old Dates)
+    # 2. -map_metadata:s:v -1   Strips old Video Title (Fixes "MPEG-4 AVC" label)
+    # 3. -map_metadata:s:a -1   Strips old Audio Title (Fixes "Dolby Digital" label)
+    # 4. (No -map_chapters)     FFmpeg defaults to copying chapters from input
+    
     "${FFMPEG_CMD[@]}" -i "$INPUT" \
         -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
-        -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
+        -map_metadata -1 \
+        -map_metadata:s:v -1 \
+        -map_metadata:s:a -1 \
+        "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
-    if [ $? -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed. Check ${CURRENT_LOG}"; rm -f "$TEMP_IN_DIR"; return
+    FFMPEG_EXIT_CODE=$?
+    
+    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
+        write_log ERROR "FFmpeg crashed (Code: $FFMPEG_EXIT_CODE). Check ${CURRENT_LOG}"
+        rm -f "$TEMP_IN_DIR"
+        return
     fi
 
     # --- 6. Safety Checks & Success Finalization ---
