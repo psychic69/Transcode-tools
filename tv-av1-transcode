@@ -8,6 +8,8 @@ MEDIAINFO="/usr/bin/mediainfo"
 DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
+# Suppress libva info messages (errors only)
+export LIBVA_MESSAGING_LEVEL=1
 
 # --- Global Log Definition (Your Recommendation) ---
 SHORT_DATE=$(date "+%m-%d-%y")
@@ -93,8 +95,6 @@ function check_helper_bin {
     if [ ! -w "$TV_INPUT_DIR" ] || [ ! -w "$TV_OUTPUT_DIR" ]; then write_log ERROR "Perms issue"; fi
 }
 
-# ************************************************
-# ************************************************
 function transcode {
     local gq=28; local bf=7; local space_svg=0.2
     
@@ -121,15 +121,13 @@ function transcode {
 
     [[ "$ORIG_FRAMES" == "null" ]] && ORIG_FRAMES=0
 
-    # --- 2. Subtitle Strategy (Passthrough only) ---
+    # --- 2. Subtitle Strategy ---
     SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
 
-    # --- 3. Video Strategy (Fixed Hardware Handoff) ---
+    # --- 3. Video Strategy ---
     if [[ "$V_CODEC" == "av1" ]]; then 
         VIDEO_OPTS=("-c:v" "copy")
     else
-        # This specific chain fixes the "Impossible to convert" error:
-        # vpp_qsv=format=p010 ensures the hardware scales 8-bit to 10-bit correctly.
         VIDEO_OPTS=(
             "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
             "-c:v" "av1_qsv" 
@@ -155,40 +153,45 @@ function transcode {
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 5. Execution (Corrected HW Initialization) ---
+    # --- 5. Execution ---
     write_log INFO "Executing FFmpeg command..."
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
-    
-    # We must set the init_devices and filter_hw_device to avoid the "Function not implemented" error
-    "${FFMPEG_CMD[@]}" -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
-        -i "$INPUT" \
+    "${FFMPEG_CMD[@]}" -i "$INPUT" \
         -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
         -map_metadata 0 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
-    FFMPEG_EXIT_CODE=$?
-    
-    if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
-        write_log ERROR "FFmpeg crashed (Code: $FFMPEG_EXIT_CODE). Check ${CURRENT_LOG}"
-        rm -f "$TEMP_IN_DIR"
-        return
+    if [ $? -ne 0 ]; then
+        write_log ERROR "FFmpeg crashed. Check ${CURRENT_LOG}"; rm -f "$TEMP_IN_DIR"; return
     fi
 
-    # --- 6. Safety Checks ---
+    # --- 6. Safety Checks & Success Finalization ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
-        OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
+        # Restored Size Calculations
+        OLD_SIZE=$(stat -c%s "$INPUT")
+        NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
+        local old_mb=$((OLD_SIZE / 1048576))
+        local new_mb=$((NEW_SIZE / 1048576))
+        
+        THRESHOLD=$(echo "$OLD_SIZE * (1-$space_svg)" | bc -l)
+        IS_SIZE_VALID=$(echo "$NEW_SIZE < $THRESHOLD" | bc -l)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
-        # Standard check: if it created a file and didn't crash, we'll take it
-        write_log INFO "Success: ${SAVINGS}% savings. Replacing original."
-        TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
-        TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
-        ((TOTAL_FILES_PROCESSED++))
-        mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+        if [[ "$IS_SIZE_VALID" -eq 1 ]]; then
+            write_log INFO "Success: ${SAVINGS}% savings (${old_mb}MB -> ${new_mb}MB). Replacing original."
+            TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
+            TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
+            ((TOTAL_FILES_PROCESSED++))
+            mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+        else
+            write_log WARN "Checks failed (Savings: ${SAVINGS}%). Below ${space_svg}% threshold. Keeping original."
+            rm -f "$TEMP_IN_DIR"
+            # Move to dest but keep original extension if not optimizing
+            mv "$INPUT" "$2/${BASENAME%.*}-OPT.${EXT}"
+        fi
     fi
 }
-
 ####################################################
 process_directory() {
     local input_path="$1"; local output_path="$2"
