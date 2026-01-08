@@ -99,33 +99,49 @@ function transcode {
     write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
 
     # --- 2. Strategies ---
-    if [[ -z "$S_CODEC" ]]; then SUBTITLE_OPTS="-map 0:s?"; elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then SUBTITLE_OPTS="-map 0:s? -c:s copy"; else SUBTITLE_OPTS="-map 0:s? -c:s ass"; fi
-
-    if [[ "$V_CODEC" == "av1" ]]; then VIDEO_OPTS="-c:v copy"; else
-        VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
-        VIDEO_OPTS="-vf $VF_CHAIN -c:v av1_qsv -preset 7 -global_quality:v $gq -look_ahead_depth $look_depth -extbrc 1 -b_strategy 1 -bf $bf -low_power 0 -pix_fmt p010le -fps_mode cfr"
+    if [[ -z "$S_CODEC" ]]; then 
+        SUBTITLE_OPTS=("-map" "0:s?")
+    elif [[ "$S_CODEC" =~ ^(subrip|ass|ssa|dvb_subtitle|dvb_teletext)$ ]]; then 
+        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
+    else 
+        SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "ass")
     fi
 
-    if [[ "$A_CODEC" == "aac" ]]; then AUDIO_OPTS="-c:a copy"; else
+    if [[ "$V_CODEC" == "av1" ]]; then 
+        VIDEO_OPTS=("-c:v" "copy")
+    else
+        VF_CHAIN="vpp_qsv,format=p010,fps=fps=$SRC_FPS"
+        VIDEO_OPTS=("-vf" "$VF_CHAIN" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-look_ahead_depth" "$look_depth" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0" "-pix_fmt" "p010le" "-fps_mode" "cfr")
+    fi
+
+    if [[ "$A_CODEC" == "aac" ]]; then 
+        AUDIO_OPTS=("-c:a" "copy")
+    else
         case $A_CHANNELS in 2) A_BIT="128000" ;; 6) A_BIT="256000" ;; 8) A_BIT="320000" ;; *) A_BIT="128000" ;; esac
-        AUDIO_OPTS="-c:a libopus -b:a $A_BIT -vbr on -mapping_family 1"
+        AUDIO_OPTS=("-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" "-mapping_family" "1")
     fi
 
     # --- 3. Execution ---
     write_log INFO "Executing FFmpeg command..."
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-y")
+    # loglevel error added here to silence the mapping info
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y")
     [[ "$V_CODEC" != "av1" ]] && FFMPEG_CMD+=("-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
-    FFMPEG_CMD+=("-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?" $SUBTITLE_OPTS "-map_metadata" "0" $VIDEO_OPTS $AUDIO_OPTS "-f" "matroska" "$TEMP_IN_DIR")
+    
+    # Building the full command into an array for shell safety
+    FULL_CMD=("${FFMPEG_CMD[@]}" "-i" "$INPUT" "-map" "0:v:0" "-map" "0:a?" "${SUBTITLE_OPTS[@]}" "-map_metadata" "0" "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" "-f" "matroska" "$TEMP_IN_DIR")
 
-    if [[ $DEBUG -eq 1 ]]; then "${FFMPEG_CMD[@]}" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
-    else "${FFMPEG_CMD[@]}" > /dev/null 2>&1; fi
+    if [[ $DEBUG -eq 1 ]]; then 
+        "${FULL_CMD[@]}" >> "$LOG_DIR/logfile-$(date +%m-%d-%y)" 2>&1
+    else 
+        "${FULL_CMD[@]}" > /dev/null 2>&1
+    fi
     FFMPEG_EXIT_CODE=$?
 
     if [ $FFMPEG_EXIT_CODE -ne 0 ]; then
         write_log ERROR "FFmpeg crashed. Code: $FFMPEG_EXIT_CODE"; rm -f "$TEMP_IN_DIR"; return
     fi
 
-    # --- 4. Safety Checks & Savings Logic (RESTORED) ---
+    # --- 4. Safety Checks & Savings Logic ---
     if [[ -f "$TEMP_IN_DIR" ]]; then
         NEW_METADATA=$($FFPROBE -v error -select_streams v:0 -show_entries stream=nb_frames -show_entries format=duration -of json "$TEMP_IN_DIR")
         NEW_FRAMES=$(echo "$NEW_METADATA" | $JQ -r '.streams[0].nb_frames')
@@ -154,7 +170,6 @@ function transcode {
         fi
     fi
 }
-
 # Recursive Process
 process_directory() {
     local input_path="$1"; local output_path="$2"
