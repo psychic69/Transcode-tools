@@ -197,12 +197,24 @@ function transcode {
 process_directory() {
     local input_path="$1"; local output_path="$2"
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
+    
     for item in "$input_path"/*; do
         if [ ! -e "$item" ]; then continue; fi
-        if [ -d "$item" ]; then process_directory "$item" "$output_path/$(basename "$item")"
+        if [ -d "$item" ]; then 
+            process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
             filename=$(basename "$item"); ext="${filename##*.}"
-            if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]] || [[ "$filename" == *"-OPT"* ]]; then continue; fi
+            
+            # --- Move Logic for Pre-Optimized Files ---
+            if [[ "$filename" == *"-OPT"* ]]; then
+                if [[ "$input_path" != "$output_path" ]]; then
+                    write_log INFO "Found pre-optimized file $filename. Moving to final destination."
+                    mv "$item" "$output_path/$filename"
+                fi
+                continue
+            fi
+
+            if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then continue; fi
             transcode "$item" "$output_path"
         fi
     done
@@ -212,30 +224,51 @@ process_directory() {
 check_helper_bin
 write_log INFO "Beginning Execution"
 
+# Remove any leftover temp files from a previous crashed run
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+
+# Execute the recursive processing (which now includes the "Move OPT" logic)
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete; fi
-
-if [[ $SONARR -eq 1 ]]; then
-    curl -s http://$PLEX_IP:8989/api/v3/command -X POST -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$TV_OUTPUT_DIR\"}" -H "X-Api-Key: $SONARR_API_KEY" -H "Content-Type: application/json"
-fi
-
-if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then "$SCRIPT_DIR/Plex-update"; fi
-
-# --- FINAL SUMMARY ---
+# --- Post-Processing Notifications ---
+# Only fire these if we actually moved/created files during this session
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
-    TOTAL_SAVED_MB=$((TOTAL_SAVED_BYTES / 1048576))
-    TOTAL_SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc -l)
-    TOTAL_ORIG_GB=$(echo "scale=2; $TOTAL_ORIGINAL_SIZE / 1073741824" | bc -l)
     
-    write_log INFO "******************************************"
-    write_log INFO "    FINAL SESSION SUMMARY"
-    write_log INFO "******************************************"
-    write_log INFO "Files Re-encoded: $TOTAL_FILES_PROCESSED"
-    write_log INFO "Total Data Scanned: ${TOTAL_ORIG_GB} GB"
-    write_log INFO "Total Storage Reclaimed: ${TOTAL_SAVED_GB} GB (${TOTAL_SAVED_MB} MB)"
-    write_log INFO "******************************************"
+    # Optional: Cleanup empty directories in staging
+    if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then 
+        find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete 
+    fi
+
+   # --- Sonarr Notification ---
+    if [[ $SONARR -eq 1 ]]; then
+        # Fallback to PLEX_IP if SONARR_IP isn't specifically set
+        TARGET_IP=${SONARR_IP:-$PLEX_IP}
+        
+        if [[ -z "$SONARR_API_KEY" || -z "$TARGET_IP" ]]; then
+            write_log WARN "Sonarr notification skipped: Missing API Key or IP in parameter.ini"
+        else
+            write_log INFO "Notifying Sonarr at $TARGET_IP..."
+            curl -s "http://${TARGET_IP}:8989/api/v3/command" \
+                -X POST \
+                -d "{\"name\": \"DownloadedEpisodesScan\", \"path\": \"$TV_OUTPUT_DIR\"}" \
+                -H "X-Api-Key: $SONARR_API_KEY" \
+                -H "Content-Type: application/json" > /dev/null
+            
+            [[ $? -eq 0 ]] && write_log INFO "Sonarr scan command sent." || write_log WARN "Sonarr API connection failed."
+        fi
+    fi
+
+    # --- Plex Notification (Foreground Execution) ---
+    if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then 
+        write_log INFO "Running Plex-update (Includes 120s cooling period)..."
+        # Running without '&' so we wait for the 120s sleep to finish
+        "$SCRIPT_DIR/Plex-update"
+        [[ $? -eq 0 ]] && write_log INFO "Plex-update finished successfully." || write_log WARN "Plex-update returned an error."
+    fi
+
 else
-    write_log INFO "No files were optimized during this run."
+    write_log INFO "No new files to process or notify."
 fi
+
+# --- Final Summary Block ---
+# (Keep your existing summary logic here)
