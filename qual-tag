@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# --- Configuration ---
+TARGET_DIR="$1"
+TAG="[Web-1080p]"
+ALLOWED_EXT="mkv|mp4"
+
+if [[ -z "$TARGET_DIR" ]]; then
+    echo "Usage: $0 /path/to/Series_Folder"
+    exit 1
+fi
+
+echo "Scanning: $TARGET_DIR"
+
+# Find video files in Season folders
+find "$TARGET_DIR" -type f -regextype posix-extended -regex ".*(Season [0-9]+).*\.($ALLOWED_EXT)$" | while read -r FILE; do
+    
+    FILENAME=$(basename "$FILE")
+    DIRNAME=$(dirname "$FILE")
+    EXTENSION="${FILENAME##*.}"
+    BASENAME="${FILENAME%.*}"
+
+    # Skip if the quality tag is already there
+    if [[ "$FILENAME" == *"$TAG"* ]]; then
+        continue
+    fi
+
+    # Handle the naming logic
+    if [[ "$BASENAME" == *"-OPT" ]]; then
+        # For already transcoded files: 
+        # Inserts tag before -OPT so it stays at the end
+        BASE_NO_OPT="${BASENAME%-OPT}"
+        NEW_NAME="${BASE_NO_OPT} ${TAG}-OPT.${EXTENSION}"
+    else
+        # For original files (not yet transcoded):
+        # Simply appends the tag before the extension
+        NEW_NAME="${BASENAME} ${TAG}.${EXTENSION}"
+    fi
+
+    echo "Renaming: '$FILENAME' -> '$NEW_NAME'"
+    mv "$FILE" "$DIRNAME/$NEW_NAME"
+    
+    # Ensure group-write permissions so Windows user can still see/rename them
+    chmod 664 "$DIRNAME/$NEW_NAME"
+done
+
+echo "Done."
