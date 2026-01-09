@@ -1,0 +1,21 @@
+name: Local Config
+version: 1.0.0
+schema: v1
+
+models:
+  - title: "Gemini 1.5 Pro"
+    provider: "gemini"
+    model: "gemini-1.5-pro-latest"
+    apiKey: "AIzaSyATUJ3yekumWMYMTg0Jxwx1Teyu8Jq_Ybk"
+    roles: ["chat"]
+  - title: "Gemini 1.5 Flash"
+    provider: "gemini"
+    model: "gemini-1.5-flash-latest"
+    apiKey: "AIzaSyATUJ3yekumWMYMTg0Jxwx1Teyu8Jq_Ybk"
+    roles: ["autocomplete"]
+
+tabAutocompleteModel:
+  title: "Gemini 1.5 Flash"
+  provider: "gemini"
+  model: "gemini-1.5-flash-latest"
+  apiKey: "AIzaSyATUJ3yekumWMYMTg0Jxwx1Teyu8Jq_Ybk"

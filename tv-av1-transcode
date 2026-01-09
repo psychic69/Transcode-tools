@@ -126,29 +126,39 @@ function transcode {
 }
 
 # Recursion with Folder Structure Preservation
+# Recursion with Structure Preservation (The Fix)
 process_directory() {
-    local input_path="$1"; local output_path="$2"
+    local input_path="$1"
+    local output_path="$2"
+
+    # Create the output directory if it doesn't exist
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
     
     for item in "$input_path"/*; do
         if [ ! -e "$item" ]; then continue; fi
+
         if [ -d "$item" ]; then 
-            # MAINTAIN STRUCTURE: Mirror the subfolder name in the output
+            # ALWAYS PRESERVE STRUCTURE: 
+            # Mirror the folder name into the destination
             process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
-            filename=$(basename "$item"); ext="${filename##*.}"
+            filename=$(basename "$item")
+            ext="${filename##*.}"
             
-            # --- HARVESTER LOGIC (RECURSIVE) ---
+            # --- THE HARVESTER LOGIC ---
             if [[ "$filename" == *"-OPT"* ]]; then
                 if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-                    write_log INFO "Harvesting existing optimized file: $filename"
+                    write_log INFO "Harvesting structure: $filename"
                     mv "$item" "$output_path/$filename"
                     ((TOTAL_FILES_PROCESSED++))
                 fi
                 continue
             fi
             
+            # Only process allowed extensions
             if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then continue; fi
+            
+            # Run the transcode and output to the mirrored folder
             transcode "$item" "$output_path"
         fi
     done
