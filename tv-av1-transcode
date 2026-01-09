@@ -58,6 +58,15 @@ PARAM_FILE="$SCRIPT_DIR/parameter.ini"
 if [[ ! -f "$PARAM_FILE" ]]; then echo "ERROR: parameter.ini not found"; exit 1; fi
 source "$PARAM_FILE"
 
+# --- Verification of Parameter.ini ---
+REQUIRED_VARS=("SONARR_API_KEY" "SONARR_IP" "SONARR_BASE_PATH" "LOG_RETENTION_DAYS")
+for var in "${REQUIRED_VARS[@]}"; do
+    if [[ -z "${!var}" ]]; then
+        write_log ERROR "Critical variable '$var' is missing or empty in parameter.ini."
+    fi
+done
+
+
 # ************************************************
 function write_log {
     local short_time=$(date "+%H:%M")
