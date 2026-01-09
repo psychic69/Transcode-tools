@@ -9,20 +9,16 @@ DEVICE="/dev/dri/renderD128"
 LOG_DIR="/media/rips/logs"
 ALLOWED_EXT="mp4,mkv"
 
-# Suppress libva info messages (errors only)
 export LIBVA_MESSAGING_LEVEL=1
 
 # --- Global Log Definition ---
 SHORT_DATE=$(date "+%m-%d-%y")
 CURRENT_LOG="$LOG_DIR/logfile-${SHORT_DATE}-PID${$}"
 
-# --- Counters for Final Summary ---
 TOTAL_SAVED_BYTES=0
 TOTAL_FILES_PROCESSED=0
 TOTAL_ORIGINAL_SIZE=0
 
-# ************************************************
-# Function to clean up on exit/interrupt (Trap)
 # ************************************************
 function cleanup_on_exit {
     if [[ -n "$TEMP_IN_DIR" && -f "$TEMP_IN_DIR" ]]; then
@@ -31,7 +27,6 @@ function cleanup_on_exit {
     fi
     exit 1
 }
-
 trap cleanup_on_exit SIGINT SIGTERM
 
 if [[ $# -eq 0 ]]; then
@@ -66,14 +61,11 @@ source "$PARAM_FILE"
 # ************************************************
 function write_log {
     local short_time=$(date "+%H:%M")
-    
-    # --- Dynamic Log Rotation ---
     if [[ -z "$ROTATION_DONE" ]]; then
         local days=${LOG_RETENTION_DAYS:-7}
         find "$LOG_DIR" -name "logfile-*" -type f -mtime +"$days" -delete 2>/dev/null
         ROTATION_DONE=1
     fi
-
     touch "${CURRENT_LOG}"
     case $1 in
         WARN | INFO | ERROR )
@@ -83,7 +75,6 @@ function write_log {
     esac
 }
 
-# ************************************************
 function check_helper_bin {
     if [ ! -x "$JQ" ] || [ ! -x "$MEDIAINFO" ] || [ ! -x "$FFPROBE" ] || [ ! -x "$FFMPEG" ]; then write_log ERROR "Bins missing"; fi
     if [ ! -w "$TV_INPUT_DIR" ] || [ ! -w "$TV_OUTPUT_DIR" ]; then write_log ERROR "Perms issue"; fi
@@ -91,69 +82,30 @@ function check_helper_bin {
 
 function transcode {
     local gq=28; local bf=7; local space_svg=0.2
+    INPUT="$1"; BASENAME=$(basename "$INPUT")
     
-    INPUT="$1"; BASENAME=$(basename "$INPUT"); EXT="${BASENAME##*.}"
-    
-    write_log INFO "=========================================="
-    write_log INFO "Processing: $BASENAME"
-    write_log INFO "=========================================="
-
-    # Destination is $2 (Smart-mode decides if this is root or subfolder)
+    # Destination is $2 (mirrored subfolder)
     TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # --- 1. Metadata Detection ---
     METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
-
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
-
-    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
-
-    # --- 2. Subtitle Strategy ---
+    
     SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
-
-    # --- 3. Video Strategy ---
-    if [[ "$V_CODEC" == "av1" ]]; then 
-        VIDEO_OPTS=("-c:v" "copy")
-    else
-        VIDEO_OPTS=(
-            "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
-            "-c:v" "av1_qsv" 
-            "-preset" "7" 
-            "-global_quality:v" "$gq" 
-            "-extbrc" "1" 
-            "-b_strategy" "1" 
-            "-bf" "$bf" 
-            "-low_power" "0"
-        )
-    fi
-
-    # --- 4. Audio Strategy ---
+    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0")
+    
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
-    if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then
-        AUDIO_OPTS=("-c:a" "copy")
-    else
-        case $A_CHANNELS in 
-            2) A_BIT="128k"; MAPPING="" ;; 
-            6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 
-            *) A_BIT="128k"; MAPPING="" ;; 
-        esac
+    if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
+        case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
     
-    # --- 5. Execution (Full Metadata Clean + HW context) ---
+    write_log INFO "Processing: $BASENAME"
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
-    
-    "${FFMPEG_CMD[@]}" -i "$INPUT" \
-        -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" \
-        -map_metadata -1 \
-        -map_metadata:s:v -1 \
-        -map_metadata:s:a -1 \
-        "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" \
-        -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
+    "${FFMPEG_CMD[@]}" -i "$INPUT" -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" -map_metadata -1 -map_metadata:s:v -1 -map_metadata:s:a -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
     if [ $? -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
@@ -168,14 +120,12 @@ function transcode {
         else
             write_log WARN "Insufficient savings. Keeping original."
             rm -f "$TEMP_IN_DIR"
-            if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-                mv "$INPUT" "$2/${BASENAME}"
-            fi
+            [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]] && mv "$INPUT" "$2/${BASENAME}"
         fi
     fi
 }
 
-# Context-Aware Directory Loop
+# Recursion with Folder Structure Preservation
 process_directory() {
     local input_path="$1"; local output_path="$2"
     if [ ! -d "$output_path" ]; then mkdir -p "$output_path"; fi
@@ -183,17 +133,12 @@ process_directory() {
     for item in "$input_path"/*; do
         if [ ! -e "$item" ]; then continue; fi
         if [ -d "$item" ]; then 
-            if [[ "$TV_INPUT_DIR" == "$TV_OUTPUT_DIR" ]]; then
-                # MODE: IN-PLACE (Maintain structure)
-                process_directory "$item" "$output_path/$(basename "$item")"
-            else
-                # MODE: HARVEST/STAGING (Flatten to root)
-                process_directory "$item" "$output_path"
-            fi
+            # MAINTAIN STRUCTURE: Mirror the subfolder name in the output
+            process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
             filename=$(basename "$item"); ext="${filename##*.}"
             
-            # --- THE HARVESTER LOGIC ---
+            # --- HARVESTER LOGIC (RECURSIVE) ---
             if [[ "$filename" == *"-OPT"* ]]; then
                 if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
                     write_log INFO "Harvesting existing optimized file: $filename"
@@ -209,22 +154,17 @@ process_directory() {
     done
 }
 
-# --- MAIN BODY ---
+# --- MAIN ---
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
-
-# Clean leftover temp files
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
-# Execute Processing
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-# --- POST-PROCESSING TASKS ---
+# --- POST-PROCESSING ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
-    # 1. Notify Sonarr to IMPORT from root (only if -sonarr flag used)
     if [[ $SONARR -eq 1 ]]; then
         write_log INFO "Notifying Sonarr for root path: $SONARR_BASE_PATH"
-        
         RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             -H "X-Api-Key: $SONARR_API_KEY" \
             -H "Content-Type: application/json" \
@@ -237,34 +177,21 @@ if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
             "http://${SONARR_IP}:8989/api/v3/command")
 
         echo "[SONARR RESPONSE] $RESPONSE" >> "${CURRENT_LOG}"
-        if [[ "$RESPONSE" == *"HTTP_STATUS:201"* ]]; then
-            write_log INFO "Sonarr manual import triggered successfully."
-        else
-            write_log ERROR "Sonarr API failed. Response in log."
-        fi
     fi
 
-    # 2. Plex Update (if -noplex not used)
-    if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then 
-        write_log INFO "Triggering Plex library update..."
-        "$SCRIPT_DIR/Plex-update"
-    fi
+    [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]] && "$SCRIPT_DIR/Plex-update"
     
-    # 3. Clean up empty source directories if harvesting
+    # Cleanup empty source directories
     if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
          find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
     fi
 fi
 
-# --- FINAL SUMMARY ---
+# --- SUMMARY ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
     TOTAL_SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc -l)
-    TOTAL_ORIG_GB=$(echo "scale=2; $TOTAL_ORIGINAL_SIZE / 1073741824" | bc -l)
     write_log INFO "******************************************"
-    write_log INFO "Files Harvested/Processed: $TOTAL_FILES_PROCESSED"
+    write_log INFO "Files Processed: $TOTAL_FILES_PROCESSED"
     write_log INFO "Storage Saved: ${TOTAL_SAVED_GB} GB"
-    write_log INFO "Log: ${CURRENT_LOG}"
     write_log INFO "******************************************"
-else
-    write_log INFO "No files matched criteria for harvesting or transcoding."
 fi
