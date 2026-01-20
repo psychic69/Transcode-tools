@@ -114,16 +114,22 @@ function transcode {
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
+    write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
+    write_log INFO "=========================================="
+    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
+    write_log INFO "Executing FFmpeg command..."
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     "${FFMPEG_CMD[@]}" -i "$INPUT" -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" -map_metadata -1 -map_metadata:s:v -1 -map_metadata:s:a -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
 
     if [ $? -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
+        OLD_SIZE_MB=$(echo "scale=2; $OLD_SIZE / 1048576" | bc -l)
+        NEW_SIZE_MB=$(echo "scale=2; $NEW_SIZE / 1048576" | bc -l)
 
         if [[ $(echo "$NEW_SIZE < ($OLD_SIZE * (1-$space_svg))" | bc -l) -eq 1 ]]; then
-            write_log INFO "Success: ${SAVINGS}% savings."
+            write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
             ((TOTAL_FILES_PROCESSED++))
@@ -134,7 +140,7 @@ function transcode {
                 mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             fi
         else
-            write_log WARN "Insufficient savings (${SAVINGS}%). Keeping original with -OPT flag."
+            write_log INFO "Conversion complete. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Keeping original with -OPT flag."
             rm -f "$TEMP_IN_DIR"
             ((TOTAL_FILES_PROCESSED++))
             # Rename original to -OPT in the input directory first
@@ -168,8 +174,12 @@ process_directory() {
             ext="${filename##*.}"
             
             # --- THE HARVESTER LOGIC ---
-            # Skip -OPT files (already processed, waiting for Sonarr to handle)
+            # Move -OPT files to output directory if input and output differ
             if [[ "$filename" == *"-OPT"* ]]; then
+                if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                    write_log INFO "Harvesting -OPT file: $filename"
+                    mv "$item" "$output_path/$filename"
+                fi
                 continue
             fi
             
