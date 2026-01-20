@@ -184,6 +184,9 @@ process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
 # Trigger Sonarr scan if -sonarr flag is set
 if [[ $SONARR -eq 1 ]]; then
+    write_log INFO "Waiting 5 seconds for filesystem to settle..."
+    sleep 5
+    
     write_log INFO "Triggering Sonarr to scan: $SONARR_BASE_PATH"
     
     SCAN_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
