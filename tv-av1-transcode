@@ -92,9 +92,11 @@ function check_helper_bin {
 function transcode {
     local gq=28; local bf=7; local space_svg=0.2
     INPUT="$1"; BASENAME=$(basename "$INPUT")
-    
-    # Destination is $2 (mirrored subfolder)
-    TEMP_IN_DIR="$2/.${BASENAME%.*}.av1.tmp"
+    INPUT_DIR=$(dirname "$INPUT")
+    OUTPUT_MIRROR_DIR="$2"
+
+    # Temp file is created in the input directory (where the original file is)
+    TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
     METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
@@ -102,20 +104,20 @@ function transcode {
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
-    
+
     SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
     VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0")
-    
+
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
-    
+
     write_log INFO "Processing: $BASENAME"
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "error" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     "${FFMPEG_CMD[@]}" -i "$INPUT" -map 0:v:0 -map 0:a? "${SUBTITLE_OPTS[@]}" -map_metadata -1 -map_metadata:s:v -1 -map_metadata:s:a -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
-    
+
     if [ $? -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
@@ -125,11 +127,22 @@ function transcode {
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + OLD_SIZE))
             ((TOTAL_FILES_PROCESSED++))
-            mv "$TEMP_IN_DIR" "$2/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+            # Rename converted file to -OPT in the input directory first
+            mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
+            # If output differs from input, move the -OPT file to output directory
+            if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
+            fi
         else
-            write_log WARN "Insufficient savings. Keeping original."
+            write_log WARN "Insufficient savings (${SAVINGS}%). Keeping original with -OPT flag."
             rm -f "$TEMP_IN_DIR"
-            [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]] && mv "$INPUT" "$2/${BASENAME}"
+            ((TOTAL_FILES_PROCESSED++))
+            # Rename original to -OPT in the input directory first
+            mv "$INPUT" "$INPUT_DIR/${BASENAME%.*}-OPT.${ext}"
+            # If output differs from input, move the -OPT file to output directory
+            if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                mv "$INPUT_DIR/${BASENAME%.*}-OPT.${ext}" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.${ext}"
+            fi
         fi
     fi
 }
@@ -155,12 +168,8 @@ process_directory() {
             ext="${filename##*.}"
             
             # --- THE HARVESTER LOGIC ---
+            # Skip -OPT files (already processed, waiting for Sonarr to handle)
             if [[ "$filename" == *"-OPT"* ]]; then
-                if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-                    write_log INFO "Harvesting structure: $filename"
-                    mv "$item" "$output_path/$filename"
-                    ((TOTAL_FILES_PROCESSED++))
-                fi
                 continue
             fi
             
@@ -176,7 +185,15 @@ process_directory() {
 # --- MAIN ---
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
+
+# Pre-processing cleanup: Remove stale temp files and empty directory trees
+write_log INFO "Cleaning stale .tmp files and empty directories..."
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
+
+if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+    find "$TV_OUTPUT_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
+fi
 
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
