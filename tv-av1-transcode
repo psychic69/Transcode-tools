@@ -191,17 +191,23 @@ if [[ $SONARR -eq 1 ]]; then
         -H "X-Api-Key: $SONARR_API_KEY" \
         "http://${SONARR_IP}:8989/api/v3/manualimport?folder=$SONARR_BASE_PATH&filterExistingFiles=true")
     
-    echo "[SONARR SCAN] Found files to import" >> "${CURRENT_LOG}"
+    # Save to temp file to avoid argument list too long
+    TEMP_IMPORT_FILE="/tmp/sonarr-import-$$.json"
+    echo "$IMPORT_LIST" > "$TEMP_IMPORT_FILE"
     
-    # Trigger the import using the manualimport endpoint
+    FILE_COUNT=$(echo "$IMPORT_LIST" | $JQ 'length')
+    write_log INFO "Found $FILE_COUNT files to import"
+    
+    # Trigger the import using the manualimport endpoint with file input
     write_log INFO "Importing files to Sonarr library"
     IMPORT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
         -H "X-Api-Key: $SONARR_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$IMPORT_LIST" \
+        -d @"$TEMP_IMPORT_FILE" \
         "http://${SONARR_IP}:8989/api/v3/manualimport")
     
     echo "[SONARR IMPORT] $IMPORT_RESPONSE" >> "${CURRENT_LOG}"
+    rm -f "$TEMP_IMPORT_FILE"
     write_log INFO "Sonarr import completed"
 fi
 
