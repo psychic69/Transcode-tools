@@ -137,6 +137,7 @@ function transcode {
             mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
             # If output differs from input, move the -OPT file to output directory
             if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                mkdir -p "$OUTPUT_MIRROR_DIR"
                 mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             fi
         else
@@ -147,6 +148,7 @@ function transcode {
             mv "$INPUT" "$INPUT_DIR/${BASENAME%.*}-OPT.${ext}"
             # If output differs from input, move the -OPT file to output directory
             if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                mkdir -p "$OUTPUT_MIRROR_DIR"
                 mv "$INPUT_DIR/${BASENAME%.*}-OPT.${ext}" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.${ext}"
             fi
         fi
@@ -178,6 +180,7 @@ process_directory() {
             if [[ "$filename" == *"-OPT"* ]]; then
                 if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
                     write_log INFO "Harvesting -OPT file: $filename"
+                    mkdir -p "$output_path"
                     mv "$item" "$output_path/$filename"
                 fi
                 continue
