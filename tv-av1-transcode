@@ -181,42 +181,49 @@ find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
 # --- POST-PROCESSING ---
-if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
-    if [[ $SONARR -eq 1 ]]; then
-        write_log INFO "Notifying Sonarr to scan: $SONARR_BASE_PATH"
-        
-        # First, scan the directory
-        SCAN_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-            -H "X-Api-Key: $SONARR_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"name\": \"DownloadedEpisodesScan\",
-                \"path\": \"$SONARR_BASE_PATH\"
-            }" \
-            "http://${SONARR_IP}:8989/api/v3/command")
 
-        echo "[SONARR SCAN] $SCAN_RESPONSE" >> "${CURRENT_LOG}"
-        
-        write_log INFO "Scan complete, waiting 5 seconds before triggering import..."
-        sleep 5
-        
-        # Then trigger import of discovered files
-        write_log INFO "Triggering Sonarr import process"
-        IMPORT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-            -H "X-Api-Key: $SONARR_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"name": "ProcessMonitoredDownloads"}' \
-            "http://${SONARR_IP}:8989/api/v3/command")
-        
-        echo "[SONARR IMPORT] $IMPORT_RESPONSE" >> "${CURRENT_LOG}"
-        write_log INFO "Sonarr import triggered successfully"
-    fi
-
-    [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]] && "$SCRIPT_DIR/Plex-update"
+# Sonarr notification - runs independently when -sonarr flag is set
+if [[ $SONARR -eq 1 ]]; then
+    write_log INFO "Notifying Sonarr to scan: $SONARR_BASE_PATH"
     
-    # Cleanup empty source directories
+    # First, scan the directory
+    SCAN_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        -H "X-Api-Key: $SONARR_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"name\": \"DownloadedEpisodesScan\",
+            \"path\": \"$SONARR_BASE_PATH\"
+        }" \
+        "http://${SONARR_IP}:8989/api/v3/command")
+
+    echo "[SONARR SCAN] $SCAN_RESPONSE" >> "${CURRENT_LOG}"
+    
+    write_log INFO "Scan complete, waiting 5 seconds before triggering import..."
+    sleep 5
+    
+    # Then trigger import of discovered files
+    write_log INFO "Triggering Sonarr import process"
+    IMPORT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        -H "X-Api-Key: $SONARR_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"name": "ProcessMonitoredDownloads"}' \
+        "http://${SONARR_IP}:8989/api/v3/command")
+    
+    echo "[SONARR IMPORT] $IMPORT_RESPONSE" >> "${CURRENT_LOG}"
+    write_log INFO "Sonarr import triggered successfully"
+fi
+
+# Plex update - runs independently unless -noplex flag is set
+if [[ $NOPLEX -eq 0 && -x "$SCRIPT_DIR/Plex-update" ]]; then
+    write_log INFO "Triggering Plex library update"
+    "$SCRIPT_DIR/Plex-update"
+fi
+
+# Cleanup - only runs if files were actually processed
+if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
     if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-         find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
+        write_log INFO "Cleaning up empty source directories"
+        find "$TV_INPUT_DIR" -mindepth 1 -type d -empty -delete
     fi
 fi
 
