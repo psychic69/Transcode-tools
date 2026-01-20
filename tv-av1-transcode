@@ -183,15 +183,13 @@ process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 # --- POST-PROCESSING ---
 if [ "$TOTAL_FILES_PROCESSED" -gt 0 ]; then
     if [[ $SONARR -eq 1 ]]; then
-        write_log INFO "Notifying Sonarr for root path: $SONARR_BASE_PATH"
+        write_log INFO "Notifying Sonarr to scan: $SONARR_BASE_PATH"
         RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             -H "X-Api-Key: $SONARR_API_KEY" \
             -H "Content-Type: application/json" \
             -d "{
-                \"name\": \"ManualImport\",
-                \"path\": \"$SONARR_BASE_PATH\",
-                \"importMode\": \"move\",
-                \"overwrite\": true
+                \"name\": \"DownloadedEpisodesScan\",
+                \"path\": \"$SONARR_BASE_PATH\"
             }" \
             "http://${SONARR_IP}:8989/api/v3/command")
 
