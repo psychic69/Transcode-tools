@@ -106,7 +106,21 @@ function transcode {
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
 
     SUBTITLE_OPTS=("-map" "0:s?" "-c:s" "copy")
-    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0")
+    #VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "7" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0")
+    # Optimized for Intel QSV AV1 (Arc/12th Gen+)
+    # Preset 3 (Slow) provides the best balance of compression for VDENC
+    # BF 7 + B-Strategy 1 enables the Pyramid B-frame structure seen in your logs
+    VIDEO_OPTS=(
+     "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
+    "-c:v" "av1_qsv" 
+    "-preset" "3" 
+    "-global_quality:v" "$gq" 
+    "-extbrc" "1" 
+    "-b_strategy" "1" 
+    "-bf" "$bf" 
+    "-low_power" "0" 
+    "-async_depth" "4"
+    )
 
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
