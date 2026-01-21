@@ -17,7 +17,6 @@ CURRENT_LOG="$LOG_DIR/logfile-${SHORT_DATE}-PID${$}"
 
 TOTAL_SAVED_BYTES=0
 TOTAL_FILES_PROCESSED=0
-TOTAL_ORIGINAL_SIZE=0
 
 # ************************************************
 function check_helper_bin {
@@ -66,8 +65,8 @@ done
 # Set directory/file parameters
 TV_INPUT_PATH="$1"
 TV_OUTPUT_DIR="$2"
+ORIGINAL_INPUT_PATH="$TV_INPUT_PATH"
 
-# If input is a file, output defaults to its directory
 if [[ -f "$TV_INPUT_PATH" ]]; then
     TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$(dirname "$TV_INPUT_PATH")}
 else
@@ -113,32 +112,37 @@ function transcode {
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     
-    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
-
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
+
+    # Audio Logic
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
+    # Shared Video Options
+    COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
+
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
     write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
-    write_log INFO "Executing FFmpeg command..."
     
     local log_lvl="error"
     [[ $DEBUG -eq 1 ]] && log_lvl="info"
 
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
-    
+    # UNIVERSAL HYBRID PATH: Stable VAAPI Decoding mapped to Powerful QSV Encoding
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
+    FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
+
     TEST_OPTS=()
     [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
+    write_log INFO "Executing FFmpeg command (Hybrid Path)..."
     start_time=$(date +%s)
-    "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" -map 0:v:0 -map 0:a? -map 0:s? -c:s copy -map_metadata -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
+    "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" -map 0:v:0 -map 0:a? -map 0:s? -c:s copy -map_metadata -1 "${FILTER_OPTS[@]}" "${COMMON_V_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     exit_code=$?
     end_time=$(date +%s)
     duration=$((end_time - start_time))
@@ -160,7 +164,7 @@ function transcode {
                 mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
-                if [[ "$TV_INPUT_PATH" != "$TV_OUTPUT_DIR" ]]; then
+                if [[ "$ORIGINAL_INPUT_PATH" != "$TV_OUTPUT_DIR" ]]; then
                     mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
                 fi
             fi
@@ -201,10 +205,8 @@ write_log INFO "Start. Input: $TV_INPUT_PATH | Output: $TV_OUTPUT_DIR"
 find "$(dirname "$TV_INPUT_PATH")" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
 if [[ -f "$TV_INPUT_PATH" ]]; then
-    # Handle single file input
     transcode "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
 else
-    # Handle directory input
     process_directory "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
 fi
 
