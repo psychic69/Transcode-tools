@@ -17,9 +17,17 @@ CURRENT_LOG="$LOG_DIR/logfile-${SHORT_DATE}-PID${$}"
 
 TOTAL_SAVED_BYTES=0
 TOTAL_FILES_PROCESSED=0
-TOTAL_ORIGINAL_SIZE=0
 
 # ************************************************
+function check_helper_bin {
+    for bin in "$FFMPEG" "$FFPROBE" "$JQ"; do
+        if [[ ! -x "$bin" ]]; then
+            echo "ERROR: $bin not found or not executable"
+            exit 1
+        fi
+    done
+}
+
 function cleanup_on_exit {
     if [[ -n "$TEMP_IN_DIR" && -f "$TEMP_IN_DIR" ]]; then
         echo "[WARN] Script interrupted. Removing incomplete file: $TEMP_IN_DIR"
@@ -77,7 +85,7 @@ function write_log {
 }
 
 function transcode {
-    local gq=28; local bf=7; local space_svg=0.2; local min_size_mb=100
+    local gq=28; local bf=7; local min_size_mb=50
     INPUT="$1"; BASENAME=$(basename "$INPUT")
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
@@ -85,31 +93,28 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
-    V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
+    METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,r_frame_rate -show_entries format=duration -of json "$INPUT")
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
+    SRC_DURATION=$(echo "$METADATA" | $JQ -r '.format.duration' | cut -d. -f1)
     
-   # Optimized for Archival Quality on Arc A380 (VDENC-compatible)
-
     VIDEO_OPTS=(
-    "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
-    "-c:v" "av1_qsv" 
-    "-preset" "3"                 # Highest hardware quality (Slow)
-    "-rc" "icq"                   # Intelligent Constant Quality (better than CQP)
-    "-icq_quality" "$gq"          # Aim for 20-24 for high-quality rips
-    "-extbrc" "1"                 # Enhanced Bitrate Control
-    "-b_strategy" "1"             # Driver-managed B-frame placement
-    "-bf" "7"                     # 3-level B-Pyramid structure
-    "-g" "600"                    # 10-20s GOP for archival space savings
-    "-low_power" "0"              # Use full VDENC feature set
-    "-async_depth" "4"            # Optimal pipeline throughput
+      "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
+      "-c:v" "av1_qsv" 
+      "-preset" "3" 
+      "-global_quality" "$gq" 
+      "-extbrc" "1" 
+      "-b_strategy" "1" 
+      "-bf" "$bf" 
+      "-g" "600" 
+      "-async_depth" "4"
     )
 
-    # Audio Logic (Copy AAC, Transcode others to Opus)
+    # Audio Logic
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
-    A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
-    if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
+    if [[ "$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')" == *"aac"* ]]; then 
+        AUDIO_OPTS=("-c:a" "copy"); 
+    else
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
@@ -121,21 +126,27 @@ function transcode {
     [[ $DEBUG -eq 1 ]] && log_lvl="info"
 
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
+    
+    start_time=$(date +%s)
     "${FFMPEG_CMD[@]}" -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -c:s copy -map_metadata -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
+    exit_code=$?
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
 
-    if [ $? -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
-        # 1. Verification Check: Does the new file have a video stream?
-        HAS_VIDEO=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
+    if [ $exit_code -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
+        # Verification Logic
+        PROBE_OUT=$($FFPROBE -v error -show_entries format=duration -select_streams v:0 -show_entries stream=codec_name -of json "$TEMP_IN_DIR")
+        HAS_VIDEO=$(echo "$PROBE_OUT" | $JQ -r '.streams[0].codec_name')
+        NEW_DUR=$(echo "$PROBE_OUT" | $JQ -r '.format.duration' | cut -d. -f1)
         
         OLD_SIZE=$(stat -c%s "$INPUT")
         NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
-        NEW_SIZE_MB=$(echo "scale=2; $NEW_SIZE / 1048576" | bc -l)
+        NEW_SIZE_MB=$(echo "$NEW_SIZE / 1048576" | bc)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
-        if [[ -n "$HAS_VIDEO" ]] && [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; then
-            # Checks passed
-            write_log INFO "Checks Passed. Size: ${NEW_SIZE_MB}MB. Savings: ${SAVINGS}%."
-            
+        # SUCCESS CONDITION: Video exists, file isn't tiny, and duration is at least 90% of source
+        if [[ "$HAS_VIDEO" != "null" ]] && [[ $NEW_SIZE_MB -gt $min_size_mb ]] && [[ $NEW_DUR -gt $((SRC_DURATION * 9 / 10)) ]]; then
+            write_log INFO "Success. Size: ${NEW_SIZE_MB}MB. Savings: ${SAVINGS}%."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             ((TOTAL_FILES_PROCESSED++))
 
@@ -150,23 +161,23 @@ function transcode {
                 fi
             fi
         else
-            # FAILURE LOGIC
-            write_log WARN "FAILURE on $BASENAME. (Size: ${NEW_SIZE_MB}MB, VideoStream: ${HAS_VIDEO:-NONE})"
-            write_log WARN "Prepending ERROR- to original file."
-            
-            # Rename original to ERROR-[filename]
+            # RENDER FINISHED BUT OUTPUT IS WRONG (Bad Source)
+            write_log WARN "Incomplete Output for $BASENAME. Renaming source to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
             rm -f "$TEMP_IN_DIR"
         fi
     else
-        # FFmpeg itself failed
-        write_log WARN "FFmpeg exited with error code on $BASENAME. Renaming original to ERROR-."
-        mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
+        # FFmpeg CRASHED OR FAILED QUICKLY (Likely Script/Driver Issue)
+        if [[ $duration -lt 10 ]]; then
+            write_log WARN "FFmpeg crashed immediately on $BASENAME. Check flags. Skipping rename."
+        else
+            write_log WARN "FFmpeg failed mid-process on $BASENAME. Renaming source to ERROR-."
+            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
+        fi
         rm -f "$TEMP_IN_DIR"
     fi
 }
 
-# Recursion logic remains same...
 process_directory() {
     local input_path="$1"
     local output_path="$2"
@@ -178,7 +189,6 @@ process_directory() {
             process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
             filename=$(basename "$item"); ext="${filename##*.}"
-            # Ignore files already marked as Error or Optimized
             if [[ "$filename" == "ERROR-"* ]] || [[ "$filename" == *"-OPT"* ]]; then continue; fi
             if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then continue; fi
             transcode "$item" "$output_path"
@@ -186,9 +196,8 @@ process_directory() {
     done
 }
 
-# --- Main execution remains same ---
+# --- Main ---
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
-# (Rest of post-processing logic)
