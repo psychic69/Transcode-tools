@@ -35,12 +35,12 @@ function cleanup_on_exit {
 trap cleanup_on_exit SIGINT SIGTERM
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] [-test] [-gc <value>] <input_dir_or_file> [output_dir]"
+    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] [-test] [-gc <val>] [-file] <input> [output]"
     exit 1
 fi
 
 # Parse command line arguments
-DEBUG=0; NOPLEX=0; SONARR=0; KEEP=0; TEST_MODE=0; OVERRIDE_GQ=""
+DEBUG=0; NOPLEX=0; SONARR=0; KEEP=0; TEST_MODE=0; OVERRIDE_GQ=""; SINGLE_FILE_MODE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -debug) DEBUG=1; shift ;;
@@ -48,29 +48,24 @@ while [[ $# -gt 0 ]]; do
         -sonarr) SONARR=1; shift ;;
         -keep) KEEP=1; shift ;;
         -test) TEST_MODE=1; shift ;;
-        -gc) 
-            if [[ "$2" =~ ^[0-9]+$ ]]; then
-                OVERRIDE_GQ="$2"
-                shift 2
-            else
-                echo "ERROR: -gc requires a numeric value"
-                exit 1
-            fi
-            ;;
-        -*) shift ;; # Ignore unknown flags
-        *) break ;;   # End of flags, start of paths
+        -file) SINGLE_FILE_MODE=1; shift ;;
+        -gc) OVERRIDE_GQ="$2"; shift 2 ;;
+        -*) shift ;; 
+        *) break ;;  
     esac
 done
 
-# Set directory/file parameters
-TV_INPUT_PATH="$1"
+# Set directory parameters
+TV_INPUT_DIR="$1"
 TV_OUTPUT_DIR="$2"
-ORIGINAL_INPUT_PATH="$TV_INPUT_PATH"
 
-if [[ -f "$TV_INPUT_PATH" ]]; then
-    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$(dirname "$TV_INPUT_PATH")}
+# Logic for optional output dir
+if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
+    # If file mode and no output provided, use the file's current directory
+    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$(dirname "$TV_INPUT_DIR")}
 else
-    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_PATH}
+    # If directory mode and no output provided, use the input directory
+    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
 fi
 
 # Load parameter.ini
@@ -116,24 +111,20 @@ function transcode {
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
 
-    # Audio Logic
     if [[ "$A_CODEC_LOWER" == *"aac"* ]]; then AUDIO_OPTS=("-c:a" "copy"); else
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
-    # Shared Video Options
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
-    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
     
     local log_lvl="error"
     [[ $DEBUG -eq 1 ]] && log_lvl="info"
 
-    # UNIVERSAL HYBRID PATH: Stable VAAPI Decoding mapped to Powerful QSV Encoding
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
     FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
 
@@ -156,7 +147,7 @@ function transcode {
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
         if [[ -n "$HAS_VIDEO" ]] && { [[ $TEST_MODE -eq 1 ]] || [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; }; then
-            write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
+            write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB)."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             ((TOTAL_FILES_PROCESSED++))
 
@@ -164,7 +155,7 @@ function transcode {
                 mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
-                if [[ "$ORIGINAL_INPUT_PATH" != "$TV_OUTPUT_DIR" ]]; then
+                if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
                     mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
                 fi
             fi
@@ -174,12 +165,7 @@ function transcode {
             rm -f "$TEMP_IN_DIR"
         fi
     else
-        if [[ $duration -gt 15 ]]; then
-            write_log WARN "FFmpeg failed mid-process. Renaming $BASENAME to ERROR-."
-            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
-        else
-            write_log WARN "FFmpeg crashed immediately on $BASENAME. Check flags. Skipping rename."
-        fi
+        write_log WARN "FFmpeg failed on $BASENAME."
         rm -f "$TEMP_IN_DIR"
     fi
 }
@@ -201,13 +187,19 @@ process_directory() {
 
 # --- Execution ---
 check_helper_bin
-write_log INFO "Start. Input: $TV_INPUT_PATH | Output: $TV_OUTPUT_DIR"
-find "$(dirname "$TV_INPUT_PATH")" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
+# Find temp files in the directory containing the input (works for file or dir)
+TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
+find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
-if [[ -f "$TV_INPUT_PATH" ]]; then
-    transcode "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
+if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
+    if [[ -f "$TV_INPUT_DIR" ]]; then
+        transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+    else
+        write_log ERROR "-file flag used but input is not a file."
+    fi
 else
-    process_directory "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
+    process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 fi
 
 SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)
