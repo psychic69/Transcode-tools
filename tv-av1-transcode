@@ -20,7 +20,6 @@ TOTAL_FILES_PROCESSED=0
 TOTAL_ORIGINAL_SIZE=0
 
 # ************************************************
-# Added missing function to prevent startup crash
 function check_helper_bin {
     for bin in "$FFMPEG" "$FFPROBE" "$JQ"; do
         if [[ ! -x "$bin" ]]; then echo "ERROR: $bin not found"; exit 1; fi
@@ -99,7 +98,7 @@ function transcode {
     # VIDEO_OPTS: Only added -g 600
     VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "4")
 
-    # Audio Logic: Reverted to your exact original block
+    # Audio Logic
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
@@ -108,8 +107,11 @@ function transcode {
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
-    write_log INFO "------------------------------------------"
+    write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
+    write_log INFO "=========================================="
+    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
+    write_log INFO "Executing FFmpeg command..."
     
     local log_lvl="error"
     [[ $DEBUG -eq 1 ]] && log_lvl="info"
@@ -126,11 +128,12 @@ function transcode {
         HAS_VIDEO=$($FFPROBE -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$TEMP_IN_DIR")
         OLD_SIZE=$(stat -c%s "$INPUT")
         NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
+        OLD_SIZE_MB=$(echo "scale=2; $OLD_SIZE / 1048576" | bc -l)
         NEW_SIZE_MB=$(echo "scale=2; $NEW_SIZE / 1048576" | bc -l)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
         if [[ -n "$HAS_VIDEO" ]] && [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; then
-            write_log INFO "Checks Passed. Size: ${NEW_SIZE_MB}MB. Savings: ${SAVINGS}%."
+            write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             ((TOTAL_FILES_PROCESSED++))
 
@@ -143,17 +146,16 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "FAILURE on $BASENAME. Renaming to ERROR-."
+            write_log WARN "FAILURE on $BASENAME. (Size: ${NEW_SIZE_MB}MB). Renaming to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
             rm -f "$TEMP_IN_DIR"
         fi
     else
-        # Only rename to ERROR- if it didn't crash immediately (Likely bad file, not bad script)
         if [[ $duration -gt 15 ]]; then
             write_log WARN "FFmpeg failed mid-process. Renaming $BASENAME to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
         else
-            write_log WARN "FFmpeg crashed immediately on $BASENAME. Skipping rename."
+            write_log WARN "FFmpeg crashed immediately on $BASENAME. Check flags. Skipping rename."
         fi
         rm -f "$TEMP_IN_DIR"
     fi
@@ -179,7 +181,6 @@ write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
 find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 
-# Summary Logic
 SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)
 write_log INFO "------------------------------------------"
 write_log INFO "Finished. Files Processed: $TOTAL_FILES_PROCESSED. Total Saved: ${SAVED_GB}GB."
