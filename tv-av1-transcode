@@ -55,17 +55,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set directory parameters
-TV_INPUT_DIR="$1"
-TV_OUTPUT_DIR="$2"
-
-# Logic for optional output dir
-if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
-    # If file mode and no output provided, use the file's current directory
-    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$(dirname "$TV_INPUT_DIR")}
+# We use realpath to ensure the string comparison for "Adoption" is accurate
+TV_INPUT_DIR=$(realpath "$1")
+if [[ -n "$2" ]]; then
+    TV_OUTPUT_DIR=$(realpath "$2")
 else
-    # If directory mode and no output provided, use the input directory
-    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
+    # If no output provided, default depends on mode
+    if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
+        TV_OUTPUT_DIR=$(dirname "$TV_INPUT_DIR")
+    else
+        TV_OUTPUT_DIR="$TV_INPUT_DIR"
+    fi
 fi
 
 # Load parameter.ini
@@ -99,6 +99,21 @@ function transcode {
     INPUT="$1"; BASENAME=$(basename "$INPUT")
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
+
+    # --- CONDITIONAL ADOPTION LOGIC ---
+    # Only move existing -OPT files if an explicit different output directory was passed
+    if [[ "$BASENAME" == *"-OPT.mkv" ]]; then
+        if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+            write_log INFO "Moving existing optimized file to output: $BASENAME"
+            mkdir -p "$OUTPUT_MIRROR_DIR"
+            mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
+            ((TOTAL_FILES_PROCESSED++))
+            return
+        else
+            # If input and output are the same, just ignore -OPT files as usual
+            return
+        fi
+    fi
 
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
@@ -178,7 +193,7 @@ process_directory() {
         if [ -d "$item" ]; then process_directory "$item" "$output_path/$(basename "$item")"
         elif [ -f "$item" ]; then
             filename=$(basename "$item"); ext="${filename##*.}"
-            if [[ "$filename" == "ERROR-"* ]] || [[ "$filename" == *"-OPT"* ]]; then continue; fi
+            if [[ "$filename" == "ERROR-"* ]]; then continue; fi
             if [[ ! ",$ALLOWED_EXT," =~ ",$ext," ]]; then continue; fi
             transcode "$item" "$output_path"
         fi
@@ -188,7 +203,6 @@ process_directory() {
 # --- Execution ---
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
-# Find temp files in the directory containing the input (works for file or dir)
 TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
