@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# --- Configuration ---
+FFMPEG="/usr/lib/jellyfin-ffmpeg/ffmpeg"
+DEVICE="/dev/dri/renderD128"
+INPUT="$1"
+
+if [[ -z "$INPUT" ]]; then
+    echo "Usage: $0 <input_file>"
+    exit 1
+fi
+
+# Function to run a test case with full logging
+run_test() {
+    local SUFFIX=$1
+    local PRESET=$2
+    local LA=$3
+    local OUTPUT="test_${SUFFIX}.mkv"
+    local LOG="test_${SUFFIX}.log"
+
+    echo "----------------------------------------------------"
+    echo "RUNNING TEST: $SUFFIX"
+    echo "Preset: $PRESET | Look-Ahead: $LA"
+    echo "Log file: $LOG"
+    echo "----------------------------------------------------"
+
+    # 1. We use -loglevel debug to see every internal QSV decision
+    # 2. We redirect both stdout and stderr (2>&1) to the log file
+    $FFMPEG -hide_banner -loglevel debug -y \
+        -hwaccel qsv -qsv_device "$DEVICE" -hwaccel_output_format qsv \
+        -i "$INPUT" \
+        -c:v av1_qsv \
+        -preset "$PRESET" \
+        -global_quality:v 28 \
+        -extbrc 1 \
+        -look_ahead "$LA" \
+        -look_ahead_depth 40 \
+        -extra_hw_frames 40 \
+        -b_strategy 1 \
+        -bf 7 \
+        -low_power 0 \
+        -c:a copy \
+        -frames:v 500 \
+        "$OUTPUT" > "$LOG" 2>&1
+
+    # Print the specific line we are looking for to the console for a quick status check
+    grep -i "RateControlMethod" "$LOG" | head -n 1
+}
+
+# --- Test Cases ---
+# Note: -frames:v 500 is added so the tests finish quickly
+run_test "P7_noLA" "7" "0"
+run_test "P7_withLA" "7" "1"
+run_test "P3_noLA" "3" "0"
+run_test "P3_withLA" "3" "1"
+
+echo ""
+echo "******************************************"
+echo "TEST COMPLETE"
+echo "Full logs available in this directory (.log files)"
+ls -lh test_*.mkv test_*.log
+echo "******************************************"
