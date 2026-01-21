@@ -36,7 +36,7 @@ function cleanup_on_exit {
 trap cleanup_on_exit SIGINT SIGTERM
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] [-test] [-gc <value>] <input_dir> [output_dir]"
+    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] [-test] [-gc <value>] <input_dir_or_file> [output_dir]"
     exit 1
 fi
 
@@ -63,10 +63,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set directory parameters
-TV_INPUT_DIR="$1"
+# Set directory/file parameters
+TV_INPUT_PATH="$1"
 TV_OUTPUT_DIR="$2"
-TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
+
+# If input is a file, output defaults to its directory
+if [[ -f "$TV_INPUT_PATH" ]]; then
+    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$(dirname "$TV_INPUT_PATH")}
+else
+    TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_PATH}
+fi
 
 # Load parameter.ini
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,9 +98,7 @@ function write_log {
 }
 
 function transcode {
-    # Default general archival quality for QSV encoder, shouls work for most media
     local gq=28
-    # Apply GQ override if provided
     [[ -n "$OVERRIDE_GQ" ]] && gq="$OVERRIDE_GQ"
     
     local bf=7; local space_svg=0.2; local min_size_mb=100
@@ -109,10 +113,8 @@ function transcode {
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     
-    # VIDEO_OPTS: Only added -g 600 and verified -global_quality:v application
     VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
-    # Audio Logic
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
@@ -132,7 +134,6 @@ function transcode {
 
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
-    # Add time limit if in test mode
     TEST_OPTS=()
     [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
@@ -150,7 +151,6 @@ function transcode {
         NEW_SIZE_MB=$(echo "scale=2; $NEW_SIZE / 1048576" | bc -l)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
-        # Skip min_size check if testing
         if [[ -n "$HAS_VIDEO" ]] && { [[ $TEST_MODE -eq 1 ]] || [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; }; then
             write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
@@ -160,7 +160,7 @@ function transcode {
                 mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
-                if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                if [[ "$TV_INPUT_PATH" != "$TV_OUTPUT_DIR" ]]; then
                     mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
                 fi
             fi
@@ -195,10 +195,18 @@ process_directory() {
     done
 }
 
+# --- Execution ---
 check_helper_bin
-write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
-find "$TV_INPUT_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
-process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+write_log INFO "Start. Input: $TV_INPUT_PATH | Output: $TV_OUTPUT_DIR"
+find "$(dirname "$TV_INPUT_PATH")" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+
+if [[ -f "$TV_INPUT_PATH" ]]; then
+    # Handle single file input
+    transcode "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
+else
+    # Handle directory input
+    process_directory "$TV_INPUT_PATH" "$TV_OUTPUT_DIR"
+fi
 
 SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)
 write_log INFO "------------------------------------------"
