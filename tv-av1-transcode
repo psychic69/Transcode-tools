@@ -89,7 +89,21 @@ function transcode {
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     
-    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-low_power" "0" "-async_depth" "4")
+   # Optimized for Archival Quality on Arc A380 (VDENC-compatible)
+
+    VIDEO_OPTS=(
+    "-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" 
+    "-c:v" "av1_qsv" 
+    "-preset" "3"                 # Highest hardware quality (Slow)
+    "-rc" "icq"                   # Intelligent Constant Quality (better than CQP)
+    "-icq_quality" "$gq"          # Aim for 20-24 for high-quality rips
+    "-extbrc" "1"                 # Enhanced Bitrate Control
+    "-b_strategy" "1"             # Driver-managed B-frame placement
+    "-bf" "7"                     # 3-level B-Pyramid structure
+    "-g" "600"                    # 10-20s GOP for archival space savings
+    "-low_power" "0"              # Use full VDENC feature set
+    "-async_depth" "4"            # Optimal pipeline throughput
+    )
 
     # Audio Logic (Copy AAC, Transcode others to Opus)
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
