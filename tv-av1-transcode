@@ -36,27 +36,36 @@ function cleanup_on_exit {
 trap cleanup_on_exit SIGINT SIGTERM
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] <input_dir> [output_dir]"
+    echo "Usage: $0 [-debug] [-noplex] [-sonarr] [-keep] [-test] [-gc <value>] <input_dir> [output_dir]"
     exit 1
 fi
 
 # Parse command line arguments
-DEBUG=0; NOPLEX=0; SONARR=0; KEEP=0
-for arg in "$@"; do
-    if [[ "$arg" == "-debug" ]]; then DEBUG=1; fi
-    if [[ "$arg" == "-noplex" ]]; then NOPLEX=1; fi
-    if [[ "$arg" == "-sonarr" ]]; then SONARR=1; fi
-    if [[ "$arg" == "-keep" ]]; then KEEP=1; fi
+DEBUG=0; NOPLEX=0; SONARR=0; KEEP=0; TEST_MODE=0; OVERRIDE_GQ=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -debug) DEBUG=1; shift ;;
+        -noplex) NOPLEX=1; shift ;;
+        -sonarr) SONARR=1; shift ;;
+        -keep) KEEP=1; shift ;;
+        -test) TEST_MODE=1; shift ;;
+        -gc) 
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                OVERRIDE_GQ="$2"
+                shift 2
+            else
+                echo "ERROR: -gc requires a numeric value"
+                exit 1
+            fi
+            ;;
+        -*) shift ;; # Ignore unknown flags
+        *) break ;;   # End of flags, start of paths
+    esac
 done
 
 # Set directory parameters
-TV_INPUT_DIR=""; TV_OUTPUT_DIR=""; arg_count=0
-for arg in "$@"; do
-    if [[ "$arg" != "-debug" && "$arg" != "-noplex" && "$arg" != "-sonarr" && "$arg" != "-keep" ]]; then
-        ((arg_count++))
-        if [[ $arg_count -eq 1 ]]; then TV_INPUT_DIR="$arg"; elif [[ $arg_count -eq 2 ]]; then TV_OUTPUT_DIR="$arg"; fi
-    fi
-done
+TV_INPUT_DIR="$1"
+TV_OUTPUT_DIR="$2"
 TV_OUTPUT_DIR=${TV_OUTPUT_DIR:-$TV_INPUT_DIR}
 
 # Load parameter.ini
@@ -83,7 +92,12 @@ function write_log {
 }
 
 function transcode {
-    local gq=28; local bf=7; local space_svg=0.2; local min_size_mb=100
+    # Default general archival quality for QSV encoder, shouls work for most media
+    local gq=28
+    # Apply GQ override if provided
+    [[ -n "$OVERRIDE_GQ" ]] && gq="$OVERRIDE_GQ"
+    
+    local bf=7; local space_svg=0.2; local min_size_mb=100
     INPUT="$1"; BASENAME=$(basename "$INPUT")
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
@@ -95,8 +109,8 @@ function transcode {
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
     
-    # VIDEO_OPTS: Only added -g 600
-    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "4")
+    # VIDEO_OPTS: Only added -g 600 and verified -global_quality:v application
+    VIDEO_OPTS=("-vf" "vpp_qsv=format=p010,fps=fps=$SRC_FPS" "-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     # Audio Logic
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
@@ -110,7 +124,7 @@ function transcode {
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
-    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch)"
+    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
     write_log INFO "Executing FFmpeg command..."
     
     local log_lvl="error"
@@ -118,8 +132,12 @@ function transcode {
 
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-hwaccel" "qsv" "-qsv_device" "$DEVICE" "-hwaccel_output_format" "qsv")
     
+    # Add time limit if in test mode
+    TEST_OPTS=()
+    [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
+
     start_time=$(date +%s)
-    "${FFMPEG_CMD[@]}" -i "$INPUT" -map 0:v:0 -map 0:a? -map 0:s? -c:s copy -map_metadata -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
+    "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" -map 0:v:0 -map 0:a? -map 0:s? -c:s copy -map_metadata -1 "${VIDEO_OPTS[@]}" "${AUDIO_OPTS[@]}" -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     exit_code=$?
     end_time=$(date +%s)
     duration=$((end_time - start_time))
@@ -132,7 +150,8 @@ function transcode {
         NEW_SIZE_MB=$(echo "scale=2; $NEW_SIZE / 1048576" | bc -l)
         SAVINGS=$(echo "scale=2; 100 - ($NEW_SIZE * 100 / $OLD_SIZE)" | bc -l)
 
-        if [[ -n "$HAS_VIDEO" ]] && [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; then
+        # Skip min_size check if testing
+        if [[ -n "$HAS_VIDEO" ]] && { [[ $TEST_MODE -eq 1 ]] || [[ $(echo "$NEW_SIZE_MB > $min_size_mb" | bc -l) -eq 1 ]]; }; then
             write_log INFO "Safety checks passed. Savings: ${SAVINGS}% (${OLD_SIZE_MB}MB -> ${NEW_SIZE_MB}MB). Replacing original."
             TOTAL_SAVED_BYTES=$((TOTAL_SAVED_BYTES + (OLD_SIZE - NEW_SIZE)))
             ((TOTAL_FILES_PROCESSED++))
