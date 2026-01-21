@@ -105,7 +105,7 @@ function transcode {
       "-extbrc" "1" 
       "-b_strategy" "1" 
       "-bf" "$bf" 
-      "-g" "600" 
+      "-low_power" "0"
       "-async_depth" "4"
     )
 
