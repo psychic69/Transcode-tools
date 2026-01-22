@@ -61,6 +61,7 @@ TV_INPUT_DIR=$(realpath "$1")
 if [[ -n "$2" ]]; then
     TV_OUTPUT_DIR=$(realpath "$2")
 else
+    # Correctly identify parent directory for single-file mode
     if [[ -f "$TV_INPUT_DIR" ]]; then
         TV_OUTPUT_DIR=$(dirname "$TV_INPUT_DIR")
     else
@@ -123,40 +124,40 @@ function transcode {
         INPUT_DIR=$(dirname "$INPUT")
     fi
 
-    # --- SKIP LOGIC: Already Optimized or Known DV5 ---
+    # --- GLOBAL SKIP: Already Optimized or Tagged DV5 ---
     if [[ "$BASENAME" == *"-OPT.mkv" || "$BASENAME" == *"-DV5.mkv" || "$BASENAME" == *"-OPT.mp4" || "$BASENAME" == *"-DV5.mp4" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-            write_log INFO "Migrating existing file (already OPT/DV5): $BASENAME"
+            write_log INFO "Migrating already processed file: $BASENAME"
             mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
             mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
             ((TOTAL_FILES_PROCESSED++)); return
         else
-            [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Skipping already processed file: $BASENAME"
+            [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Already processed, skipping: $BASENAME"
             return
         fi
+    fi
+
+    # --- DV PROFILE 5 DETECTION (Highest Reliability) ---
+    # We search the entire MediaInfo output for the specific Profile 5 string
+    IS_DV5=$($MEDIAINFO "$INPUT" | grep -i "HDR format" | grep "Profile 5")
+    
+    if [[ -n "$IS_DV5" ]]; then
+        NEW_NAME="${BASENAME%.*}-DV5.mkv"
+        write_log WARN "Dolby Vision Profile 5 detected! Tagging and bypassing: $NEW_NAME"
+        
+        if [[ "$INPUT_DIR" == "$OUTPUT_MIRROR_DIR" ]]; then
+            mv "$INPUT" "$INPUT_DIR/$NEW_NAME"
+        else
+            mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
+            mv "$INPUT" "$OUTPUT_MIRROR_DIR/$NEW_NAME"
+        fi
+        return
     fi
 
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # --- DV PROFILE 5 DETECTION (Using MediaInfo) ---
-    DV_CHECK=$($MEDIAINFO --Inform="Video;%HDR_Format_Profile%" "$INPUT" 2>/dev/null)
-    if [[ "$DV_CHECK" == *"Profile 5"* ]]; then
-        NEW_NAME="${BASENAME%.*}-DV5.mkv"
-        write_log WARN "DV Profile 5 detected via MediaInfo. Tagging and bypassing: $NEW_NAME"
-        
-        # Rename original to -DV5
-        mv "$INPUT" "$INPUT_DIR/$NEW_NAME"
-        
-        # If output mirror is active, move it to the final destination
-        if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-            mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
-            mv "$INPUT_DIR/$NEW_NAME" "$OUTPUT_MIRROR_DIR/$NEW_NAME"
-        fi
-        return
-    fi
-
-    # --- METADATA GATHERING (FFprobe for streams) ---
+    # --- METADATA GATHERING ---
     METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
@@ -172,7 +173,7 @@ function transcode {
 
     if [[ "$BEST_A_INDEX" -eq -1 ]]; then write_log WARN "No audio found in $BASENAME"; return; fi
 
-    # Subtitle selection via language tag
+    # Subtitle selection
     BEST_S_INDEX=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="subtitle" and (.tags.language=="eng" or .tags.language=="en")) | .index' | head -n1)
 
     A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
@@ -181,12 +182,10 @@ function transcode {
     if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then AUDIO_OPTS=("-c:a" "copy")
     else
         case $A_CHANNELS in 
-            2) A_BIT="128k"; MAPPING="" ;; 
-            6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 
-            8) A_BIT="320k"; MAPPING="-mapping_family 1" ;; 
-            *) A_BIT="128k"; MAPPING="" ;; 
+            2) A_BIT="128k" ;; 6) A_BIT="256k" ;; 8) A_BIT="320k" ;; *) A_BIT="128k" ;; 
         esac
-        AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
+        AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on")
+        [[ $A_CHANNELS -gt 2 ]] && AUDIO_OPTS+=("-mapping_family" "1")
     fi
 
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
@@ -221,7 +220,6 @@ function transcode {
             ((TOTAL_FILES_PROCESSED++))
 
             if [[ $KEEP -eq 1 ]]; then
-                if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null; fi
                 mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
@@ -230,11 +228,12 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "Output check failed. Renaming original to ERROR-."
-            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
+            write_log WARN "Safety check failed (file too small). Cleaning up."
+            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
+            rm -f "$TEMP_IN_DIR"
         fi
     else
-        write_log WARN "FFmpeg failed on $BASENAME. Check log: ${CURRENT_LOG}"
+        write_log WARN "FFmpeg failed on $BASENAME. Check log."
         rm -f "$TEMP_IN_DIR"
     fi
 }
@@ -243,14 +242,13 @@ function transcode {
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR"
 
-# Cleanup stale tmp files
+# Clean stale tmp files
 TEMP_FIND_DIR=$( [[ -f "$TV_INPUT_DIR" ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -maxdepth 2 -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
 if [[ -f "$TV_INPUT_DIR" ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
-    # Recursive search: Excludes already optimized (-OPT) and known Dolby Vision 5 (-DV5) files
     FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*-DV5.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     
@@ -259,10 +257,8 @@ else
         if [[ "$SUB_DIR" == "." ]]; then TARGET_OUT="$TV_OUTPUT_DIR"; else TARGET_OUT="$TV_OUTPUT_DIR/$SUB_DIR"; fi
         transcode "$item" "$TARGET_OUT"
     done < <(eval "$FIND_CMD -print0")
-    
-    # Cleanup empty staging directories
     find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 fi
 
 refresh_sonarr; refresh_plex
-write_log INFO "Finished. Files: $TOTAL_FILES_PROCESSED. Saved: $(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)GB."
+write_log INFO "Finished. Files: $TOTAL_FILES_PROCESSED. Total Saved: $(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)GB."
