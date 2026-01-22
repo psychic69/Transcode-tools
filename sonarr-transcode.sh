@@ -1,4 +1,4 @@
-#!/bin/bash
+\#!/bin/bash
 
 # --- Global Binaries and Paths ---
 JQ=/usr/bin/jq
@@ -56,12 +56,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Resolve Paths
+# --- FIXED PATH RESOLUTION LOGIC ---
 TV_INPUT_DIR=$(realpath "$1")
 if [[ -n "$2" ]]; then
     TV_OUTPUT_DIR=$(realpath "$2")
 else
-    if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
+    # If -file is used, the output dir should be the parent folder of the file
+    if [[ -f "$TV_INPUT_DIR" ]]; then
         TV_OUTPUT_DIR=$(dirname "$TV_INPUT_DIR")
     else
         TV_OUTPUT_DIR="$TV_INPUT_DIR"
@@ -152,11 +153,9 @@ function transcode {
 
     if [[ "$BEST_A_INDEX" -eq -1 ]]; then write_log WARN "No audio found in $BASENAME"; return; fi
 
-    # --- DYNAMIC SUBTITLE SELECTION ---
-    # Find the index of the first English subtitle track
+    # Dynamic Subtitle Selector
     BEST_S_INDEX=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="subtitle" and (.tags.language=="eng" or .tags.language=="en")) | .index' | head -n1)
 
-    # Audio Logic
     A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
     A_CODEC=$(echo "$A_INFO" | $JQ -r '.codec_name'); A_CHANNELS=$(echo "$A_INFO" | $JQ -r '.channels')
 
@@ -176,13 +175,12 @@ function transcode {
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
     FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
 
-    # Construct Mapping
     MAP_OPTS=("-map" "0:v:0" "-map" "0:$BEST_A_INDEX")
     [[ -n "$BEST_S_INDEX" ]] && MAP_OPTS+=("-map" "0:$BEST_S_INDEX")
 
     TEST_OPTS=(); [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
-    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Final Mapping: ${MAP_OPTS[@]}"
+    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Mapping: ${MAP_OPTS[@]} | Output Mirror Dir: $OUTPUT_MIRROR_DIR"
 
     "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" \
         "${MAP_OPTS[@]}" -c:s copy -map_metadata -1 \
@@ -200,10 +198,12 @@ function transcode {
             ((TOTAL_FILES_PROCESSED++))
 
             if [[ $KEEP -eq 1 ]]; then
-                mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
+                # Fix: Don't try to mkdir the mirror dir if it's identical to input dir
+                if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then mkdir -p "$OUTPUT_MIRROR_DIR"; fi
+                mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
-                if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+                if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then
                     mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
                 fi
             fi
@@ -221,20 +221,24 @@ function transcode {
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR"
 
-TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
+# Cleanup stale tmp files
+TEMP_FIND_DIR=$( [[ -f "$TV_INPUT_DIR" ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
-if [[ $SINGLE_FILE_MODE -eq 1 ]]; then transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+if [[ -f "$TV_INPUT_DIR" ]]; then
+    transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
     FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     while IFS= read -r -d '' item; do
         REL_PATH="${item#$TV_INPUT_DIR/}"; SUB_DIR=$(dirname "$REL_PATH")
-        TARGET_OUT=$( [[ "$SUB_DIR" == "." ]] && echo "$TV_OUTPUT_DIR" || echo "$TV_OUTPUT_DIR/$SUB_DIR" )
+        # Ensure mirror output path is constructed correctly
+        if [[ "$SUB_DIR" == "." ]]; then TARGET_OUT="$TV_OUTPUT_DIR"; else TARGET_OUT="$TV_OUTPUT_DIR/$SUB_DIR"; fi
         transcode "$item" "$TARGET_OUT"
     done < <(eval "$FIND_CMD -print0")
+    # Directory cleanup only if not in single file mode
+    find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 fi
 
-[[ $SINGLE_FILE_MODE -eq 0 ]] && find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 refresh_sonarr; refresh_plex
 write_log INFO "Finished. Files: $TOTAL_FILES_PROCESSED. Saved: $(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)GB."
