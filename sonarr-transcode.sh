@@ -20,7 +20,7 @@ TOTAL_FILES_PROCESSED=0
 
 # ************************************************
 function check_helper_bin {
-    for bin in "$FFMPEG" "$FFPROBE" "$JQ"; do
+    for bin in "$FFMPEG" "$FFPROBE" "$JQ" "$MEDIAINFO"; do
         if [[ ! -x "$bin" ]]; then echo "ERROR: $bin not found"; exit 1; fi
     done
 }
@@ -124,13 +124,14 @@ function transcode {
     fi
 
     # --- SKIP LOGIC: Already Optimized or Known DV5 ---
-    if [[ "$BASENAME" == *"-OPT.mkv" || "$BASENAME" == *"-DV5.mkv" ]]; then
+    if [[ "$BASENAME" == *"-OPT.mkv" || "$BASENAME" == *"-DV5.mkv" || "$BASENAME" == *"-OPT.mp4" || "$BASENAME" == *"-DV5.mp4" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-            write_log INFO "Migrating existing file: $BASENAME"
+            write_log INFO "Migrating existing file (already OPT/DV5): $BASENAME"
             mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
             mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
             ((TOTAL_FILES_PROCESSED++)); return
         else
+            [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Skipping already processed file: $BASENAME"
             return
         fi
     fi
@@ -138,29 +139,27 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # --- METADATA GATHERING ---
-    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels,side_data_list:stream_tags=language -of json "$INPUT")
-    V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
-    SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
-    
-    # Identify Dolby Vision Profile 5
-    DV_PROFILE=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .side_data_list[]? | select(.side_data_type=="DOVI configuration record") | .profile' | head -n1)
-
-    # --- DV PROFILE 5 TAG & BYPASS ---
-    if [[ "$DV_PROFILE" == "5" ]]; then
+    # --- DV PROFILE 5 DETECTION (Using MediaInfo) ---
+    DV_CHECK=$($MEDIAINFO --Inform="Video;%HDR_Format_Profile%" "$INPUT" 2>/dev/null)
+    if [[ "$DV_CHECK" == *"Profile 5"* ]]; then
         NEW_NAME="${BASENAME%.*}-DV5.mkv"
-        write_log WARN "DV Profile 5 detected. Tagging and bypassing: $NEW_NAME"
+        write_log WARN "DV Profile 5 detected via MediaInfo. Tagging and bypassing: $NEW_NAME"
         
         # Rename original to -DV5
         mv "$INPUT" "$INPUT_DIR/$NEW_NAME"
         
-        # If output mirror is active, move it there
+        # If output mirror is active, move it to the final destination
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
             mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
             mv "$INPUT_DIR/$NEW_NAME" "$OUTPUT_MIRROR_DIR/$NEW_NAME"
         fi
         return
     fi
+
+    # --- METADATA GATHERING (FFprobe for streams) ---
+    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
+    V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
+    SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
 
     # Audio Ranking: Most Channels > Best Source
     BEST_A_INDEX=-1; MAX_CHANNELS=0; MAX_PRIORITY=0
@@ -181,7 +180,12 @@ function transcode {
 
     if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then AUDIO_OPTS=("-c:a" "copy")
     else
-        case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 8) A_BIT="320k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
+        case $A_CHANNELS in 
+            2) A_BIT="128k"; MAPPING="" ;; 
+            6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 
+            8) A_BIT="320k"; MAPPING="-mapping_family 1" ;; 
+            *) A_BIT="128k"; MAPPING="" ;; 
+        esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
@@ -226,7 +230,7 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "Output too small. Renaming original to ERROR-."
+            write_log WARN "Output check failed. Renaming original to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
         fi
     else
@@ -246,8 +250,8 @@ find "$TEMP_FIND_DIR" -maxdepth 2 -name ".*.av1.tmp" -type f -delete 2>/dev/null
 if [[ -f "$TV_INPUT_DIR" ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
-    # Recursive search based on DAYS_TO_LOOK_BACK or full scan
-    FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
+    # Recursive search: Excludes already optimized (-OPT) and known Dolby Vision 5 (-DV5) files
+    FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*-DV5.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     
     while IFS= read -r -d '' item; do
@@ -255,7 +259,8 @@ else
         if [[ "$SUB_DIR" == "." ]]; then TARGET_OUT="$TV_OUTPUT_DIR"; else TARGET_OUT="$TV_OUTPUT_DIR/$SUB_DIR"; fi
         transcode "$item" "$TARGET_OUT"
     done < <(eval "$FIND_CMD -print0")
-    # Clean empty dirs
+    
+    # Cleanup empty staging directories
     find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 fi
 
