@@ -210,7 +210,9 @@ function transcode {
     write_log INFO "Video: $V_CODEC | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
     
     local log_lvl="error"; [[ $DEBUG -eq 1 ]] && log_lvl="info"
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
+    # -nostdin stops the random pausing but ignores Ctrl+C (SIGINT)
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-nostdin" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
+    #FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
     FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
 
     MAP_OPTS=("-map" "0:v:0" "-map" "0:$BEST_A_INDEX")
