@@ -44,7 +44,7 @@ DEBUG=0; DO_PLEX=0; SONARR=0; KEEP=0; TEST_MODE=0; OVERRIDE_GQ=""; SINGLE_FILE_M
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -debug) DEBUG=1; shift ;;
-        -plex)  DO_PLEX=1; shift ;;   # Updated to positive flag
+        -plex)  DO_PLEX=1; shift ;;
         -sonarr) SONARR=1; shift ;;
         -keep) KEEP=1; shift ;;
         -test) TEST_MODE=1; shift ;;
@@ -92,7 +92,6 @@ function write_log {
 }
 
 function refresh_plex {
-    # Only execute if -plex flag was passed
     if [[ $DO_PLEX -eq 1 && -n "$PLEX_TOKEN" && -n "$PLEX_URL" ]]; then
         write_log INFO "Triggering Plex library refresh via API..."
         curl -s -X GET "$PLEX_URL/library/sections/all/refresh?X-Plex-Token=$PLEX_TOKEN" > /dev/null
@@ -118,14 +117,12 @@ function transcode {
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
 
-    # Sonarr Environment Logic
     if [[ $SONARR -eq 1 && -n "$sonarr_episodefile_path" ]]; then
         INPUT="$sonarr_episodefile_path"
         BASENAME=$(basename "$INPUT")
         INPUT_DIR=$(dirname "$INPUT")
     fi
 
-    # Migration Logic
     if [[ "$BASENAME" == *"-OPT.mkv" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
             write_log INFO "Migrating existing optimized file: $BASENAME"
@@ -139,12 +136,12 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # Metadata & Audio Selection
+    # --- METADATA & AUDIO SELECTION ---
     METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels -of json "$INPUT")
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
 
-    # Best Audio Logic: Most Channels > Best Source Codec
+    # Audio Selection logic: Most Channels > Quality Codec
     BEST_A_INDEX=-1; MAX_CHANNELS=0; MAX_PRIORITY=0
     while read -r idx codec channels; do
         PRIORITY=1
@@ -167,7 +164,6 @@ function transcode {
     A_CODEC=$(echo "$A_INFO" | $JQ -r '.codec_name')
     A_CHANNELS=$(echo "$A_INFO" | $JQ -r '.channels')
 
-    # Audio Encoding decision
     if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then
         AUDIO_OPTS=("-c:a" "copy")
     else
@@ -186,9 +182,14 @@ function transcode {
 
     TEST_OPTS=(); [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
-    # Map only Video, Best Audio track, and English Subtitles
+    # Debug: Print the mapping string
+    if [[ $DEBUG -eq 1 ]]; then
+        echo "[DEBUG] FFmpeg Mapping: -map 0:v:0 -map 0:$BEST_A_INDEX -map 0:s:m:language:eng?"
+    fi
+
+    # Transcode with quoted selectors to ensure shell safety
     "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" \
-        -map 0:v:0 -map 0:$BEST_A_INDEX -map 0:s:m:language:eng? \
+        -map 0:v:0 -map "0:$BEST_A_INDEX" -map "0:s:m:language:eng?" \
         -c:s copy -map_metadata -1 \
         "${FILTER_OPTS[@]}" "${COMMON_V_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
@@ -216,7 +217,8 @@ function transcode {
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
         fi
     else
-        write_log WARN "FFmpeg failed on $BASENAME."; rm -f "$TEMP_IN_DIR"
+        write_log WARN "FFmpeg failed on $BASENAME. Check log: ${CURRENT_LOG}"
+        rm -f "$TEMP_IN_DIR"
     fi
 }
 
@@ -224,14 +226,12 @@ function transcode {
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR"
 
-# Clean stale temp files
 TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
 if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
-    # Build filtered file list based on DAYS_TO_LOOK_BACK or full scan
     FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     
@@ -242,10 +242,8 @@ else
     done < <(eval "$FIND_CMD -print0")
 fi
 
-# Cleanup empty directory trees
 [[ $SINGLE_FILE_MODE -eq 0 ]] && find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 
-# Integration API Updates
 refresh_sonarr
 refresh_plex
 
