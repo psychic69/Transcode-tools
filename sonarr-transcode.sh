@@ -123,11 +123,12 @@ function transcode {
         INPUT_DIR=$(dirname "$INPUT")
     fi
 
-    # Migration Logic
-    if [[ "$BASENAME" == *"-OPT.mkv" ]]; then
+    # --- SKIP LOGIC: Already Optimized or Known DV5 ---
+    if [[ "$BASENAME" == *"-OPT.mkv" || "$BASENAME" == *"-DV5.mkv" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-            write_log INFO "Migrating existing optimized file: $BASENAME"
-            mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
+            write_log INFO "Migrating existing file: $BASENAME"
+            mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
+            mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
             ((TOTAL_FILES_PROCESSED++)); return
         else
             return
@@ -145,7 +146,23 @@ function transcode {
     # Identify Dolby Vision Profile 5
     DV_PROFILE=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .side_data_list[]? | select(.side_data_type=="DOVI configuration record") | .profile' | head -n1)
 
-    # Audio Ranking Logic
+    # --- DV PROFILE 5 TAG & BYPASS ---
+    if [[ "$DV_PROFILE" == "5" ]]; then
+        NEW_NAME="${BASENAME%.*}-DV5.mkv"
+        write_log WARN "DV Profile 5 detected. Tagging and bypassing: $NEW_NAME"
+        
+        # Rename original to -DV5
+        mv "$INPUT" "$INPUT_DIR/$NEW_NAME"
+        
+        # If output mirror is active, move it there
+        if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+            mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null
+            mv "$INPUT_DIR/$NEW_NAME" "$OUTPUT_MIRROR_DIR/$NEW_NAME"
+        fi
+        return
+    fi
+
+    # Audio Ranking: Most Channels > Best Source
     BEST_A_INDEX=-1; MAX_CHANNELS=0; MAX_PRIORITY=0
     while read -r idx codec channels; do
         PRIORITY=1
@@ -156,7 +173,7 @@ function transcode {
 
     if [[ "$BEST_A_INDEX" -eq -1 ]]; then write_log WARN "No audio found in $BASENAME"; return; fi
 
-    # Subtitle selection
+    # Subtitle selection via language tag
     BEST_S_INDEX=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="subtitle" and (.tags.language=="eng" or .tags.language=="en")) | .index' | head -n1)
 
     A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
@@ -164,31 +181,18 @@ function transcode {
 
     if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then AUDIO_OPTS=("-c:a" "copy")
     else
-        # Bitrate handling for 7.1/5.1/2.0
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; 8) A_BIT="320k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
-    # AV1 QSV Settings for Arc A380
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     write_log INFO "Processing: $BASENAME"
+    write_log INFO "Video: $V_CODEC | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
     
     local log_lvl="error"; [[ $DEBUG -eq 1 ]] && log_lvl="info"
-    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y")
-    
-    # --- HYBRID SOFTWARE/HARDWARE TONEMAPPING FOR DV PROFILE 5 ---
-    # zscale converts color space in software, then hwupload hands off to QSV
-    if [[ "$DV_PROFILE" == "5" ]]; then
-        write_log INFO "DV Profile 5 detected. Using software zscale tonemapper (BT.2020 -> BT.709)."
-        FILTER_OPTS=("-vf" "zscale=t=709:m=709:p=709,format=p010,hwupload=extra_hw_frames=64,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
-        # For Profile 5, we do NOT use VAAPI/QSV hardware acceleration for the input
-        FFMPEG_CMD+=("-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va")
-    else
-        # Standard hardware path for non-DV 5 files
-        FFMPEG_CMD+=("-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
-        FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
-    fi
+    FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
+    FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
 
     MAP_OPTS=("-map" "0:v:0" "-map" "0:$BEST_A_INDEX")
     [[ -n "$BEST_S_INDEX" ]] && MAP_OPTS+=("-map" "0:$BEST_S_INDEX")
@@ -222,7 +226,7 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "Output too small. Renaming to ERROR-."
+            write_log WARN "Output too small. Renaming original to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
         fi
     else
@@ -235,15 +239,17 @@ function transcode {
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR"
 
-# Cleanup
+# Cleanup stale tmp files
 TEMP_FIND_DIR=$( [[ -f "$TV_INPUT_DIR" ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -maxdepth 2 -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
 if [[ -f "$TV_INPUT_DIR" ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
-    FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
+    # Recursive search based on DAYS_TO_LOOK_BACK or full scan
+    FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
+    
     while IFS= read -r -d '' item; do
         REL_PATH="${item#$TV_INPUT_DIR/}"; SUB_DIR=$(dirname "$REL_PATH")
         if [[ "$SUB_DIR" == "." ]]; then TARGET_OUT="$TV_OUTPUT_DIR"; else TARGET_OUT="$TV_OUTPUT_DIR/$SUB_DIR"; fi
