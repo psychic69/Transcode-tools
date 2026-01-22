@@ -1,0 +1,113 @@
+#!/bin/bash
+
+DRY_RUN=false
+
+# Check for dry-run flag
+if [ "$1" = "--dry-run" ] || [ "$1" = "-n" ]; then
+    DRY_RUN=true
+    shift
+fi
+
+if [ $# -eq 0 ]; then
+    echo "Error: No directory specified"
+    echo "Usage: $0 [--dry-run] <directory>"
+    exit 1
+fi
+
+TOP_DIR="$1"
+
+if [ ! -d "$TOP_DIR" ]; then
+    echo "Error: '$TOP_DIR' is not a valid directory"
+    exit 1
+fi
+
+EXTENSIONS=("ts" "jpg" "xml" "png" "htm" "html" "nfo")
+declare -A EXT_COUNT
+TOTAL_DELETED=0
+DIRS_REMOVED=0
+
+# Initialize counters for each extension
+for ext in "${EXTENSIONS[@]}"; do
+    EXT_COUNT[$ext]=0
+done
+
+if [ "$DRY_RUN" = true ]; then
+    echo "DRY RUN MODE - No files will be deleted"
+fi
+
+echo "Starting cleanup in: $TOP_DIR"
+echo "Will remove files with extensions: ${EXTENSIONS[*]}"
+echo ""
+
+# Delete files
+for ext in "${EXTENSIONS[@]}"; do
+    while IFS= read -r -d '' file; do
+        if [ "$DRY_RUN" = true ]; then
+            echo "Would delete: $file"
+        else
+            rm -f "$file"
+            if [ $? -eq 0 ]; then
+                echo "Deleted: $file"
+            else
+                echo "Failed to delete: $file"
+                continue
+            fi
+        fi
+        ((EXT_COUNT[$ext]++))
+        ((TOTAL_DELETED++))
+    done < <(find "$TOP_DIR" -type f -name "*.${ext}" -print0)
+done
+
+echo ""
+echo "=== File Deletion Summary ==="
+for ext in "${EXTENSIONS[@]}"; do
+    if [ ${EXT_COUNT[$ext]} -gt 0 ]; then
+        echo "  *.${ext}: ${EXT_COUNT[$ext]} files"
+    fi
+done
+echo "  Total files deleted: $TOTAL_DELETED"
+echo ""
+
+# Remove empty directories (bottom-up traversal)
+if [ $TOTAL_DELETED -gt 0 ]; then
+    echo "Checking for empty directories..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        while IFS= read -r -d '' dir; do
+            echo "Would remove empty directory: $dir"
+            ((DIRS_REMOVED++))
+        done < <(find "$TOP_DIR" -type d -empty -print0)
+    else
+        # Multiple passes to handle nested empty directories
+        while true; do
+            FOUND_EMPTY=false
+            while IFS= read -r -d '' dir; do
+                rmdir "$dir" 2>/dev/null
+                if [ $? -eq 0 ]; then
+                    echo "Removed empty directory: $dir"
+                    ((DIRS_REMOVED++))
+                    FOUND_EMPTY=true
+                fi
+            done < <(find "$TOP_DIR" -type d -empty -print0)
+            
+            # Break if no empty directories were found in this pass
+            if [ "$FOUND_EMPTY" = false ]; then
+                break
+            fi
+        done
+    fi
+    
+    echo ""
+    echo "=== Directory Removal Summary ==="
+    echo "  Empty directories removed: $DIRS_REMOVED"
+fi
+
+echo ""
+echo "=== Cleanup Complete ==="
+if [ "$DRY_RUN" = true ]; then
+    echo "  Would delete: $TOTAL_DELETED files"
+    echo "  Would remove: $DIRS_REMOVED empty directories"
+else
+    echo "  Deleted: $TOTAL_DELETED files"
+    echo "  Removed: $DIRS_REMOVED empty directories"
+fi
