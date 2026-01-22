@@ -136,36 +136,31 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # --- METADATA & AUDIO SELECTION ---
-    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels -of json "$INPUT")
+    # --- METADATA GATHERING ---
+    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
 
-    # Audio Selection logic: Most Channels > Quality Codec
+    # Audio Ranking: Most Channels > Codec Quality
     BEST_A_INDEX=-1; MAX_CHANNELS=0; MAX_PRIORITY=0
     while read -r idx codec channels; do
         PRIORITY=1
-        case "$codec" in
-            dca|truehd|eac3|ac3) PRIORITY=5 ;; 
-            flac) PRIORITY=4 ;;
-            opus|aac) PRIORITY=3 ;;
-        esac
-        
-        if (( channels > MAX_CHANNELS )); then
-            MAX_CHANNELS=$channels; MAX_PRIORITY=$PRIORITY; BEST_A_INDEX=$idx
-        elif (( channels == MAX_CHANNELS )) && (( PRIORITY > MAX_PRIORITY )); then
-            MAX_PRIORITY=$PRIORITY; BEST_A_INDEX=$idx
-        fi
+        case "$codec" in dca|truehd|eac3|ac3) PRIORITY=5 ;; flac) PRIORITY=4 ;; opus|aac) PRIORITY=3 ;; esac
+        if (( channels > MAX_CHANNELS )); then MAX_CHANNELS=$channels; MAX_PRIORITY=$PRIORITY; BEST_A_INDEX=$idx
+        elif (( channels == MAX_CHANNELS )) && (( PRIORITY > MAX_PRIORITY )); then MAX_PRIORITY=$PRIORITY; BEST_A_INDEX=$idx; fi
     done < <(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="audio") | "\(.index) \(.codec_name) \(.channels)"')
 
     if [[ "$BEST_A_INDEX" -eq -1 ]]; then write_log WARN "No audio found in $BASENAME"; return; fi
 
-    A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
-    A_CODEC=$(echo "$A_INFO" | $JQ -r '.codec_name')
-    A_CHANNELS=$(echo "$A_INFO" | $JQ -r '.channels')
+    # --- DYNAMIC SUBTITLE SELECTION ---
+    # Find the index of the first English subtitle track
+    BEST_S_INDEX=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="subtitle" and (.tags.language=="eng" or .tags.language=="en")) | .index' | head -n1)
 
-    if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then
-        AUDIO_OPTS=("-c:a" "copy")
+    # Audio Logic
+    A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
+    A_CODEC=$(echo "$A_INFO" | $JQ -r '.codec_name'); A_CHANNELS=$(echo "$A_INFO" | $JQ -r '.channels')
+
+    if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then AUDIO_OPTS=("-c:a" "copy")
     else
         case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
@@ -174,23 +169,23 @@ function transcode {
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     write_log INFO "Processing: $BASENAME"
-    write_log INFO "Video: $V_CODEC | Audio: $A_CODEC ($A_CHANNELS ch) [Idx:$BEST_A_INDEX] | GQ: $gq"
-    
+    write_log INFO "Video: $V_CODEC | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
+    [[ -n "$BEST_S_INDEX" ]] && write_log INFO "Subtitles: English track found at index $BEST_S_INDEX" || write_log INFO "Subtitles: No English track found."
+
     local log_lvl="error"; [[ $DEBUG -eq 1 ]] && log_lvl="info"
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
     FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
 
+    # Construct Mapping
+    MAP_OPTS=("-map" "0:v:0" "-map" "0:$BEST_A_INDEX")
+    [[ -n "$BEST_S_INDEX" ]] && MAP_OPTS+=("-map" "0:$BEST_S_INDEX")
+
     TEST_OPTS=(); [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
-    # Debug: Print the mapping string
-    if [[ $DEBUG -eq 1 ]]; then
-        echo "[DEBUG] FFmpeg Mapping: -map 0:v:0 -map 0:$BEST_A_INDEX -map 0:s:m:language:eng?"
-    fi
+    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Final Mapping: ${MAP_OPTS[@]}"
 
-    # Transcode with quoted selectors to ensure shell safety
     "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" \
-        -map 0:v:0 -map "0:$BEST_A_INDEX" -map "0:s:m:language:eng?" \
-        -c:s copy -map_metadata -1 \
+        "${MAP_OPTS[@]}" -c:s copy -map_metadata -1 \
         "${FILTER_OPTS[@]}" "${COMMON_V_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
@@ -213,7 +208,7 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "Output check failed (file too small). Renaming original to ERROR-."
+            write_log WARN "Output too small. Renaming to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
         fi
     else
@@ -229,12 +224,10 @@ write_log INFO "Start. Input: $TV_INPUT_DIR"
 TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
-if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
-    transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+if [[ $SINGLE_FILE_MODE -eq 1 ]]; then transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
     FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
-    
     while IFS= read -r -d '' item; do
         REL_PATH="${item#$TV_INPUT_DIR/}"; SUB_DIR=$(dirname "$REL_PATH")
         TARGET_OUT=$( [[ "$SUB_DIR" == "." ]] && echo "$TV_OUTPUT_DIR" || echo "$TV_OUTPUT_DIR/$SUB_DIR" )
@@ -243,9 +236,5 @@ else
 fi
 
 [[ $SINGLE_FILE_MODE -eq 0 ]] && find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
-
-refresh_sonarr
-refresh_plex
-
-SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)
-write_log INFO "Finished. Files: $TOTAL_FILES_PROCESSED. Saved: ${SAVED_GB}GB."
+refresh_sonarr; refresh_plex
+write_log INFO "Finished. Files: $TOTAL_FILES_PROCESSED. Saved: $(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)GB."
