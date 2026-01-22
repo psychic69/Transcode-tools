@@ -110,27 +110,30 @@ function refresh_sonarr {
 }
 
 function transcode {
-    local gq=28
-
-    if [[ ! -f "$INPUT" ]]; then
-    write_log WARN "File disappeared before processing: $BASENAME"
-    return
-    fi
-
-    [[ -n "$OVERRIDE_GQ" ]] && gq="$OVERRIDE_GQ"
-    
-    local bf=7; local min_size_mb=100
-    INPUT="$1"; BASENAME=$(basename "$INPUT")
+    # --- 1. Initial Variable Setup ---
+    local gq=${OVERRIDE_GQ:-28}
+    INPUT="$1"
+    BASENAME=$(basename "$INPUT")
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
 
+    # Sonarr Path Override
     if [[ $SONARR -eq 1 && -n "$sonarr_episodefile_path" ]]; then
         INPUT="$sonarr_episodefile_path"
         BASENAME=$(basename "$INPUT")
         INPUT_DIR=$(dirname "$INPUT")
     fi
+    
+    local bf=7; local min_size_mb=100
 
-    # --- GLOBAL SKIP: Already Optimized or Tagged DV5 ---
+    # --- 2. Existence Safety Check ---
+    if [[ ! -f "$INPUT" ]]; then
+        # Only log if it's not a known hidden/system artifact
+        [[ "$BASENAME" != .* ]] && write_log WARN "File disappeared before processing: $BASENAME"
+        return
+    fi
+
+    # --- 3. GLOBAL SKIP: Already Optimized or Tagged DV5 ---
     if [[ "$BASENAME" == *"-OPT.mkv" || "$BASENAME" == *"-DV5.mkv" || "$BASENAME" == *"-OPT.mp4" || "$BASENAME" == *"-DV5.mp4" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
             write_log INFO "Migrating already processed file: $BASENAME"
@@ -143,8 +146,7 @@ function transcode {
         fi
     fi
 
-    # --- DV PROFILE 5 DETECTION (Highest Reliability) ---
-    # We search the entire MediaInfo output for the specific Profile 5 string
+    # --- 4. DV PROFILE 5 DETECTION (Highest Reliability) ---
     IS_DV5=$($MEDIAINFO "$INPUT" | grep -i "HDR format" | grep "Profile 5")
     
     if [[ -n "$IS_DV5" ]]; then
@@ -163,18 +165,14 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
- 
-   # --- METADATA GATHERING (Robust check) ---
-    # Fetch raw JSON first to verify integrity
+    # --- 5. METADATA GATHERING (Robust check) ---
     RAW_JSON=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
 
-    # Verify JSON is not empty or malformed before letting jq touch it
     if [[ -z "$RAW_JSON" || "$RAW_JSON" == "{}" ]]; then
         write_log WARN "Failed to probe metadata for $BASENAME. File may be corrupt or missing. Skipping."
         return
     fi
 
-    # Now safe to use JQ
     METADATA="$RAW_JSON"
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
@@ -205,6 +203,7 @@ function transcode {
         [[ $A_CHANNELS -gt 2 ]] && AUDIO_OPTS+=("-mapping_family" "1")
     fi
 
+    # --- 6. FFMPEG EXECUTION ---
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     write_log INFO "Processing: $BASENAME"
@@ -219,13 +218,12 @@ function transcode {
 
     TEST_OPTS=(); [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
-    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Mapping: ${MAP_OPTS[@]}"
-
     "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" \
         "${MAP_OPTS[@]}" -c:s copy -map_metadata -1 \
         "${FILTER_OPTS[@]}" "${COMMON_V_OPTS[@]}" "${AUDIO_OPTS[@]}" \
         -f matroska "$TEMP_IN_DIR" >> "${CURRENT_LOG}" 2>&1
     
+    # --- 7. POST-TRANSCODE HANDLING ---
     exit_code=$?
     if [ $exit_code -eq 0 ] && [[ -f "$TEMP_IN_DIR" ]]; then
         OLD_SIZE=$(stat -c%s "$INPUT"); NEW_SIZE=$(stat -c%s "$TEMP_IN_DIR")
@@ -266,7 +264,8 @@ find "$TEMP_FIND_DIR" -maxdepth 2 -name ".*.av1.tmp" -type f -delete 2>/dev/null
 if [[ -f "$TV_INPUT_DIR" ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 else
-    FIND_CMD="find \"$TV_INPUT_DIR\" -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*-DV5.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
+# Modified to ensure only valid files are passed to the loop
+    FIND_CMD="find \"$TV_INPUT_DIR\" -maxdepth 4 -type f \( -iname \"*.mkv\" -o -iname \"*.mp4\" \) ! -iname \"*-OPT.mkv\" ! -iname \"*-OPT.mp4\" ! -iname \"*-DV5.mkv\" ! -iname \"*-DV5.mp4\" ! -iname \"*.tmp\" ! -iname \"ERROR-*\""
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     
     while IFS= read -r -d '' item; do
