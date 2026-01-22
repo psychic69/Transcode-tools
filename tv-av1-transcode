@@ -216,14 +216,16 @@ else
     process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
 fi
 
-# RESTORED EMPTY DIRECTORY CLEANUP
+# --- RECURSIVE EMPTY DIRECTORY CLEANUP ---
 if [[ $SINGLE_FILE_MODE -eq 0 ]]; then
-    write_log INFO "Cleaning up empty directories..."
-    # Clean input staging area
-    find "$TV_INPUT_DIR" -type d -empty -delete 2>/dev/null
+    echo "[INFO] Cleaning up empty directory trees..."
+    
+    # Clean input staging area (bottom-up)
+    find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
+    
     # Clean output area if different from input
     if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-        find "$TV_OUTPUT_DIR" -type d -empty -delete 2>/dev/null
+        find "$TV_OUTPUT_DIR" -depth -type d -not -path "$TV_OUTPUT_DIR" -exec rmdir {} + 2>/dev/null
     fi
 fi
 
