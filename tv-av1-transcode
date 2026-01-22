@@ -55,12 +55,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# We use realpath to ensure the string comparison for "Adoption" is accurate
+# Resolve Paths
 TV_INPUT_DIR=$(realpath "$1")
 if [[ -n "$2" ]]; then
     TV_OUTPUT_DIR=$(realpath "$2")
 else
-    # If no output provided, default depends on mode
     if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
         TV_OUTPUT_DIR=$(dirname "$TV_INPUT_DIR")
     else
@@ -95,22 +94,20 @@ function transcode {
     local gq=28
     [[ -n "$OVERRIDE_GQ" ]] && gq="$OVERRIDE_GQ"
     
-    local bf=7; local space_svg=0.2; local min_size_mb=100
+    local bf=7; local min_size_mb=100
     INPUT="$1"; BASENAME=$(basename "$INPUT")
     INPUT_DIR=$(dirname "$INPUT")
     OUTPUT_MIRROR_DIR="$2"
 
-    # --- CONDITIONAL ADOPTION LOGIC ---
-    # Only move existing -OPT files if an explicit different output directory was passed
+    # --- Migration/Adoption Logic ---
     if [[ "$BASENAME" == *"-OPT.mkv" ]]; then
         if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
-            write_log INFO "Moving existing optimized file to output: $BASENAME"
+            write_log INFO "Migrating existing optimized file: $BASENAME"
             mkdir -p "$OUTPUT_MIRROR_DIR"
             mv "$INPUT" "$OUTPUT_MIRROR_DIR/$BASENAME"
             ((TOTAL_FILES_PROCESSED++))
             return
         else
-            # If input and output are the same, just ignore -OPT files as usual
             return
         fi
     fi
@@ -118,10 +115,10 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
+    # Detailed Metadata Gathering
     METADATA=$($FFPROBE -v error -show_entries stream=codec_name,codec_type,nb_frames,r_frame_rate,pix_fmt,channels -show_entries format=duration -of json "$INPUT")
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
-    
     A_CODEC=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .codec_name' | head -n1)
     A_CHANNELS=$(echo "$METADATA" | $JQ -r '[.streams[] | select(.codec_type=="audio")][0] | .channels' | head -n1)
     A_CODEC_LOWER=$(echo "$A_CODEC" | tr '[:upper:]' '[:lower:]')
@@ -136,6 +133,7 @@ function transcode {
     write_log INFO "=========================================="
     write_log INFO "Processing: $BASENAME"
     write_log INFO "=========================================="
+    write_log INFO "Video: $V_CODEC | FPS: $SRC_FPS | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
     
     local log_lvl="error"
     [[ $DEBUG -eq 1 ]] && log_lvl="info"
@@ -175,7 +173,7 @@ function transcode {
                 fi
             fi
         else
-            write_log WARN "FAILURE on $BASENAME. (Size: ${NEW_SIZE_MB}MB). Renaming to ERROR-."
+            write_log WARN "FAILURE on $BASENAME. Renaming to ERROR-."
             mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
             rm -f "$TEMP_IN_DIR"
         fi
@@ -203,6 +201,8 @@ process_directory() {
 # --- Execution ---
 check_helper_bin
 write_log INFO "Start. Input: $TV_INPUT_DIR | Output: $TV_OUTPUT_DIR"
+
+# Clean up temp files before starting
 TEMP_FIND_DIR=$( [[ $SINGLE_FILE_MODE -eq 1 ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
 find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
@@ -214,6 +214,17 @@ if [[ $SINGLE_FILE_MODE -eq 1 ]]; then
     fi
 else
     process_directory "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
+fi
+
+# RESTORED EMPTY DIRECTORY CLEANUP
+if [[ $SINGLE_FILE_MODE -eq 0 ]]; then
+    write_log INFO "Cleaning up empty directories..."
+    # Clean input staging area
+    find "$TV_INPUT_DIR" -type d -empty -delete 2>/dev/null
+    # Clean output area if different from input
+    if [[ "$TV_INPUT_DIR" != "$TV_OUTPUT_DIR" ]]; then
+        find "$TV_OUTPUT_DIR" -type d -empty -delete 2>/dev/null
+    fi
 fi
 
 SAVED_GB=$(echo "scale=2; $TOTAL_SAVED_BYTES / 1073741824" | bc)
