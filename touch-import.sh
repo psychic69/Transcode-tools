@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# Sonarr uses environment variables instead of arguments
-# sonarr_episodefile_path is the standard variable for imports
-episode_file="$sonarr_episodefile_path"
+# Check for Sonarr path OR Radarr path
+# Sonarr uses: sonarr_episodefile_path
+# Radarr uses: radarr_moviefile_path
+file_path="${sonarr_episodefile_path:-$radarr_moviefile_path}"
 
-if [ -f "$episode_file" ]; then
-    touch "$episode_file"
-    echo "Timestamped: $episode_file - $(date)" >> /tmp/sonarr-timestamps.log
-else
-    echo "File not found or script triggered by non-import event: $sonarr_eventtype - $(date)" >> /tmp/sonarr-timestamps.log
+if [ -f "$file_path" ]; then
+    touch "$file_path"
+    echo "Timestamped: $file_path - $(date)" >> /tmp/media-timestamps.log
 fi
