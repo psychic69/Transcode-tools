@@ -111,6 +111,12 @@ function refresh_sonarr {
 
 function transcode {
     local gq=28
+
+    if [[ ! -f "$INPUT" ]]; then
+    write_log WARN "File disappeared before processing: $BASENAME"
+    return
+    fi
+
     [[ -n "$OVERRIDE_GQ" ]] && gq="$OVERRIDE_GQ"
     
     local bf=7; local min_size_mb=100
@@ -157,8 +163,19 @@ function transcode {
     TEMP_IN_DIR="$INPUT_DIR/.${BASENAME%.*}.av1.tmp"
     rm -f "$TEMP_IN_DIR"*
 
-    # --- METADATA GATHERING ---
-    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
+ 
+   # --- METADATA GATHERING (Robust check) ---
+    # Fetch raw JSON first to verify integrity
+    RAW_JSON=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
+
+    # Verify JSON is not empty or malformed before letting jq touch it
+    if [[ -z "$RAW_JSON" || "$RAW_JSON" == "{}" ]]; then
+        write_log WARN "Failed to probe metadata for $BASENAME. File may be corrupt or missing. Skipping."
+        return
+    fi
+
+    # Now safe to use JQ
+    METADATA="$RAW_JSON"
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
 
