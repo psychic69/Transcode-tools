@@ -1,4 +1,4 @@
-\#!/bin/bash
+#!/bin/bash
 
 # --- Global Binaries and Paths ---
 JQ=/usr/bin/jq
@@ -56,12 +56,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- FIXED PATH RESOLUTION LOGIC ---
+# --- Path Resolution ---
 TV_INPUT_DIR=$(realpath "$1")
 if [[ -n "$2" ]]; then
     TV_OUTPUT_DIR=$(realpath "$2")
 else
-    # If -file is used, the output dir should be the parent folder of the file
     if [[ -f "$TV_INPUT_DIR" ]]; then
         TV_OUTPUT_DIR=$(dirname "$TV_INPUT_DIR")
     else
@@ -138,11 +137,14 @@ function transcode {
     rm -f "$TEMP_IN_DIR"*
 
     # --- METADATA GATHERING ---
-    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels:stream_tags=language -of json "$INPUT")
+    METADATA=$($FFPROBE -v error -show_entries stream=index,codec_name,codec_type,r_frame_rate,channels,side_data_list:stream_tags=language -of json "$INPUT")
     V_CODEC=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .codec_name' | head -n1)
     SRC_FPS=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .r_frame_rate' | head -n1)
+    
+    # Identify Dolby Vision Profile 5
+    DV_PROFILE=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="video") | .side_data_list[]? | select(.side_data_type=="DOVI configuration record") | .profile' | head -n1)
 
-    # Audio Ranking: Most Channels > Codec Quality
+    # Audio Ranking: Most Channels > Best Source
     BEST_A_INDEX=-1; MAX_CHANNELS=0; MAX_PRIORITY=0
     while read -r idx codec channels; do
         PRIORITY=1
@@ -153,7 +155,7 @@ function transcode {
 
     if [[ "$BEST_A_INDEX" -eq -1 ]]; then write_log WARN "No audio found in $BASENAME"; return; fi
 
-    # Dynamic Subtitle Selector
+    # Subtitle selection via language tag
     BEST_S_INDEX=$(echo "$METADATA" | $JQ -r '.streams[] | select(.codec_type=="subtitle" and (.tags.language=="eng" or .tags.language=="en")) | .index' | head -n1)
 
     A_INFO=$(echo "$METADATA" | $JQ -r ".streams[] | select(.index==$BEST_A_INDEX)")
@@ -161,26 +163,39 @@ function transcode {
 
     if [[ "$A_CODEC" == "aac" || "$A_CODEC" == "opus" ]]; then AUDIO_OPTS=("-c:a" "copy")
     else
-        case $A_CHANNELS in 2) A_BIT="128k"; MAPPING="" ;; 6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; *) A_BIT="128k"; MAPPING="" ;; esac
+        # --- UPDATED AUDIO BITRATE LOGIC ---
+        case $A_CHANNELS in 
+            2) A_BIT="128k"; MAPPING="" ;; 
+            6) A_BIT="256k"; MAPPING="-mapping_family 1" ;; # 5.1 handling
+            8) A_BIT="320k"; MAPPING="-mapping_family 1" ;; # 7.1 handling
+            *) A_BIT="128k"; MAPPING="" ;; 
+        esac
         AUDIO_OPTS=("-af" "aresample=async=1" "-c:a" "libopus" "-b:a" "$A_BIT" "-vbr" "on" $MAPPING)
     fi
 
+    # AV1 QSV Settings for Arc A380
     COMMON_V_OPTS=("-c:v" "av1_qsv" "-preset" "3" "-global_quality:v" "$gq" "-extbrc" "1" "-b_strategy" "1" "-bf" "$bf" "-g" "600" "-low_power" "0" "-async_depth" "12")
 
     write_log INFO "Processing: $BASENAME"
     write_log INFO "Video: $V_CODEC | Audio: $A_CODEC ($A_CHANNELS ch) | GQ: $gq"
-    [[ -n "$BEST_S_INDEX" ]] && write_log INFO "Subtitles: English track found at index $BEST_S_INDEX" || write_log INFO "Subtitles: No English track found."
-
+    
     local log_lvl="error"; [[ $DEBUG -eq 1 ]] && log_lvl="info"
     FFMPEG_CMD=("$FFMPEG" "-hide_banner" "-loglevel" "$log_lvl" "-y" "-init_hw_device" "vaapi=va:$DEVICE" "-init_hw_device" "qsv=hw@va" "-hwaccel" "vaapi" "-hwaccel_device" "va" "-hwaccel_output_format" "vaapi")
-    FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
+    
+    # --- TONEMAPPING LOGIC (10-bit P010 for Arc A380) ---
+    if [[ "$DV_PROFILE" == "5" ]]; then
+        write_log INFO "DV Profile 5 detected. Applying 10-bit QSV tonemapping (P010)."
+        FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010:tonemap=1,fps=fps=$SRC_FPS")
+    else
+        FILTER_OPTS=("-vf" "hwmap=derive_device=qsv,vpp_qsv=format=p010,fps=fps=$SRC_FPS")
+    fi
 
     MAP_OPTS=("-map" "0:v:0" "-map" "0:$BEST_A_INDEX")
     [[ -n "$BEST_S_INDEX" ]] && MAP_OPTS+=("-map" "0:$BEST_S_INDEX")
 
     TEST_OPTS=(); [[ $TEST_MODE -eq 1 ]] && TEST_OPTS=("-t" "300")
 
-    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Mapping: ${MAP_OPTS[@]} | Output Mirror Dir: $OUTPUT_MIRROR_DIR"
+    [[ $DEBUG -eq 1 ]] && echo "[DEBUG] Mapping: ${MAP_OPTS[@]}"
 
     "${FFMPEG_CMD[@]}" -i "$INPUT" "${TEST_OPTS[@]}" \
         "${MAP_OPTS[@]}" -c:s copy -map_metadata -1 \
@@ -198,18 +213,23 @@ function transcode {
             ((TOTAL_FILES_PROCESSED++))
 
             if [[ $KEEP -eq 1 ]]; then
-                # Fix: Don't try to mkdir the mirror dir if it's identical to input dir
-                if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then mkdir -p "$OUTPUT_MIRROR_DIR"; fi
-                mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
+                if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null; fi
+                if mv "$TEMP_IN_DIR" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"; then
+                    write_log INFO "Created: $OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
+                else
+                    write_log ERROR "Failed to move temp file. Cleaning up."
+                    rm -f "$TEMP_IN_DIR"
+                fi
             else
                 mv "$TEMP_IN_DIR" "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" && rm "$INPUT"
                 if [[ "$INPUT_DIR" != "$OUTPUT_MIRROR_DIR" ]]; then
-                    mkdir -p "$OUTPUT_MIRROR_DIR"; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
+                    mkdir -p "$OUTPUT_MIRROR_DIR" 2>/dev/null; mv "$INPUT_DIR/${BASENAME%.*}-OPT.mkv" "$OUTPUT_MIRROR_DIR/${BASENAME%.*}-OPT.mkv"
                 fi
             fi
         else
-            write_log WARN "Output too small. Renaming to ERROR-."
-            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"; rm -f "$TEMP_IN_DIR"
+            write_log WARN "Output check failed (too small). Cleaning up."
+            mv "$INPUT" "$INPUT_DIR/ERROR-$BASENAME"
+            rm -f "$TEMP_IN_DIR"
         fi
     else
         write_log WARN "FFmpeg failed on $BASENAME. Check log: ${CURRENT_LOG}"
@@ -223,7 +243,7 @@ write_log INFO "Start. Input: $TV_INPUT_DIR"
 
 # Cleanup stale tmp files
 TEMP_FIND_DIR=$( [[ -f "$TV_INPUT_DIR" ]] && echo "$(dirname "$TV_INPUT_DIR")" || echo "$TV_INPUT_DIR" )
-find "$TEMP_FIND_DIR" -name ".*.av1.tmp" -type f -delete 2>/dev/null
+find "$TEMP_FIND_DIR" -maxdepth 2 -name ".*.av1.tmp" -type f -delete 2>/dev/null
 
 if [[ -f "$TV_INPUT_DIR" ]]; then
     transcode "$TV_INPUT_DIR" "$TV_OUTPUT_DIR"
@@ -232,11 +252,9 @@ else
     [[ $FULL_SCAN -eq 0 ]] && FIND_CMD+=" -mtime -$DAYS_TO_LOOK_BACK"
     while IFS= read -r -d '' item; do
         REL_PATH="${item#$TV_INPUT_DIR/}"; SUB_DIR=$(dirname "$REL_PATH")
-        # Ensure mirror output path is constructed correctly
         if [[ "$SUB_DIR" == "." ]]; then TARGET_OUT="$TV_OUTPUT_DIR"; else TARGET_OUT="$TV_OUTPUT_DIR/$SUB_DIR"; fi
         transcode "$item" "$TARGET_OUT"
     done < <(eval "$FIND_CMD -print0")
-    # Directory cleanup only if not in single file mode
     find "$TV_INPUT_DIR" -depth -type d -not -path "$TV_INPUT_DIR" -exec rmdir {} + 2>/dev/null
 fi
 
